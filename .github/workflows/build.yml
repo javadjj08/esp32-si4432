@@ -1,4 +1,4 @@
-name: Build Diagnostic
+name: Build HIZMOS v7.1
 
 on: [workflow_dispatch]
 
@@ -20,6 +20,7 @@ jobs:
       - name: Install libraries
         run: |
           arduino-cli lib install "RadioLib@6.5.0"
+          arduino-cli lib install "ArduinoJson@6.21.3"
 
       - name: Compile with min_spiffs
         run: |
@@ -30,5 +31,5 @@ jobs:
       - name: Upload bin
         uses: actions/upload-artifact@v4
         with:
-          name: diag-firmware
+          name: hizmos-firmware
           path: build/MySketch.ino.bin
