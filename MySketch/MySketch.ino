@@ -1,7 +1,7 @@
 // ============================================================
-// HIZMOS Complete Firmware v5.0
+// HIZMOS Complete Firmware v6.0
 // ESP32 + NRF24L01 + SI4432 + Browser Audio + Remote Capture
-// GPIO2 ماژول SI4432 برای ضبط خام
+// + WiFi Scan, BLE Scan, Spectrum, Signal Gen, MQTT, WebSocket
 // ============================================================
 #include <WiFi.h>
 #include <WebServer.h>
@@ -11,6 +11,10 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <Update.h>
+#include <NimBLEDevice.h>
+#include <SD.h>
+#include <PubSubClient.h>
+#include <WebSocketsServer.h>
 
 // ========== پین‌ها ==========
 #define NRF_CE          21
@@ -18,36 +22,41 @@
 #define SI4432_CS       27
 #define SI4432_IRQ      35
 #define SI4432_SDN      32
-#define SI4432_RX_DATA  34    // متصل به GPIO2 ماژول SI4432
-
-SPIClass hspi(HSPI);
-#define HSPI_SCK   14
-#define HSPI_MISO  33
-#define HSPI_MOSI  13
+#define SI4432_RX_DATA  34
+#define SD_CS           5
+#define HSPI_SCK        14
+#define HSPI_MISO       33
+#define HSPI_MOSI       13
 
 RF24 radio_nrf(NRF_CE, NRF_CSN);
-Si4432 radio_si = new Module(SI4432_CS, SI4432_IRQ, SI4432_SDN, &hspi);
+Si4432 radio_si = new Module(SI4432_CS, SI4432_IRQ, SI4432_SDN);
 WebServer server(80);
+WebSocketsServer webSocket = WebSocketsServer(81);
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
 
 bool nrf_ok = false;
-bool si_ok  = false;
+bool si_ok = false;
+bool sd_ok = false;
 
 // ========== تنظیمات ==========
 String cfg_device_name = "HIZMOS";
-String cfg_ap_ssid     = "HIZMOS-AP";
+String cfg_ap_ssid = "HIZMOS-AP";
 String cfg_ap_password = "hizmos123";
-int    cfg_nrf_data_rate = 250;
-int    cfg_nrf_pa_level  = 2;
-int    cfg_nrf_channel   = 76;
-String cfg_nrf_address   = "HIZ01";
-float  cfg_si_freq       = 433.92;
-float  cfg_si_data_rate  = 2.4;
-int    cfg_si_power      = 10;
+int cfg_nrf_data_rate = 250;
+int cfg_nrf_pa_level = 2;
+int cfg_nrf_channel = 76;
+String cfg_nrf_address = "HIZ01";
+float cfg_si_freq = 433.92;
+float cfg_si_data_rate = 2.4;
+int cfg_si_power = 10;
 String cfg_si_modulation = "OOK";
-int    cfg_spec_start    = 430;
-int    cfg_spec_end      = 440;
-int    cfg_spec_step     = 1;
-int    cfg_rssi_samples  = 10;
+int cfg_spec_start = 430;
+int cfg_spec_end = 440;
+int cfg_spec_step = 1;
+int cfg_rssi_samples = 10;
+String cfg_mqtt_server = "192.168.1.100";
+int cfg_mqtt_port = 1883;
 
 // ========== بافر ضبط خام ==========
 #define RAW_MAX_PULSES 1024
@@ -59,14 +68,14 @@ bool rawLastState = false;
 uint32_t rawCaptureStart = 0;
 uint32_t rawCaptureDuration = 2000;
 
-// ========== صفحه HTML ==========
+// ========== HTML Page (Embedded) ==========
 const char HTML_PAGE[] PROGMEM = R"HTMLPAGE(
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>HIZMOS</title>
+<title>HIZMOS v6</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:Tahoma,Arial,sans-serif;background:#0a0a0f;color:#e0e0e0;padding:8px;font-size:13px}
@@ -107,7 +116,7 @@ label{font-size:0.78rem;color:#aaa;display:block;margin-top:6px}
 </head>
 <body>
 <div class="device">
-  <div class="header"><span class="logo" id="dName">HIZMOS</span><div class="led" id="led"></div></div>
+  <div class="header"><span class="logo" id="dName">HIZMOS v6</span><div class="led" id="led"></div></div>
   <div class="oled" id="oled"><div id="menu"></div></div>
   <div class="nav" id="nav">
     <button onclick="up()">UP</button><button class="sel" onclick="sel()">SELECT</button><button onclick="down()">DOWN</button>
@@ -131,6 +140,7 @@ label{font-size:0.78rem;color:#aaa;display:block;margin-top:6px}
     <button class="btn info" onclick="cmd('/si_spectrum')">اسکن متنی</button>
     <button class="btn info" onclick="show('v_mod')">🎛️ مدولاسیون</button>
     <button class="btn info" onclick="show('v_dr')">⚡ نرخ داده</button>
+    <button class="btn info" onclick="show('v_siggen')">📡 مولد سیگنال</button>
     <div class="log" id="l_si"></div>
   </div>
 
@@ -176,6 +186,18 @@ label{font-size:0.78rem;color:#aaa;display:block;margin-top:6px}
     <div class="log" id="l_dr"></div>
   </div>
 
+  <div class="view" id="v_siggen">
+    <button class="back" onclick="show('v_si')">بازگشت</button>
+    <h3>📡 مولد سیگنال OOK</h3>
+    <label>فرکانس (MHz):</label>
+    <input type="number" id="genFreq" value="433.92" step="0.01">
+    <label>الگوی OOK (مثلاً 1010):</label>
+    <input type="text" id="genPattern" value="1010101010101010">
+    <button class="btn green" onclick="startSigGen()">شروع ارسال</button>
+    <button class="btn red" onclick="stopSigGen()">توقف</button>
+    <div class="log" id="l_siggen"></div>
+  </div>
+
   <div class="view" id="v_listen">
     <button class="back" onclick="home()">بازگشت</button>
     <h3>🔊 شنیدن با اسپیکر گوشی</h3>
@@ -209,6 +231,28 @@ label{font-size:0.78rem;color:#aaa;display:block;margin-top:6px}
     </div>
     <button class="btn red" onclick="cmd('/raw_clear')">🗑 پاک کردن</button>
     <div class="log" id="l_raw"></div>
+  </div>
+
+  <div class="view" id="v_wifi">
+    <button class="back" onclick="home()">بازگشت</button>
+    <h3>📶 اسکن WiFi</h3>
+    <button class="btn green" onclick="cmd('/wifi_scan')">شروع اسکن</button>
+    <div class="log" id="l_wifi"></div>
+  </div>
+
+  <div class="view" id="v_ble">
+    <button class="back" onclick="home()">بازگشت</button>
+    <h3>🔵 اسکن Bluetooth</h3>
+    <button class="btn green" onclick="cmd('/ble_scan')">شروع اسکن</button>
+    <div class="log" id="l_ble"></div>
+  </div>
+
+  <div class="view" id="v_mqtt">
+    <button class="back" onclick="home()">بازگشت</button>
+    <h3>🌐 MQTT</h3>
+    <button class="btn info" onclick="cmd('/mqtt_status')">وضعیت اتصال</button>
+    <button class="btn green" onclick="cmd('/mqtt_publish')">انتشار تست</button>
+    <div class="log" id="l_mqtt"></div>
   </div>
 
   <div class="view" id="v_cfg">
@@ -296,6 +340,9 @@ var items = [
   {id:'si',label:'📻 SI4432 Sub-GHz',v:'v_si',en:true},
   {id:'listen',label:'🔊 شنیدن با اسپیکر گوشی',v:'v_listen',en:true},
   {id:'raw',label:'📡 کپی ریموت',v:'v_raw',en:true},
+  {id:'wifi',label:'📶 اسکن WiFi',v:'v_wifi',en:true},
+  {id:'ble',label:'🔵 اسکن Bluetooth',v:'v_ble',en:true},
+  {id:'mqtt',label:'🌐 MQTT',v:'v_mqtt',en:true},
   {id:'cfg',label:'⚙️ تنظیمات',v:'v_cfg',en:true},
   {id:'ota',label:'📦 OTA Update',v:'v_ota',en:true},
   {id:'sys',label:'ℹ️ سیستم',v:'v_sys',en:true}
@@ -303,6 +350,19 @@ var items = [
 var status={nrf:'N/A',si:'N/A'},cur=0,inSub=false;
 var specTimer=null,rssiTimer=null,specCtx=null;
 var listening=false, listenTimer=null, lastPulses=null;
+var ws=null;
+
+function initWS(){
+  try{
+    ws=new WebSocket('ws://'+location.hostname+':81/');
+    ws.onmessage=function(e){
+      var d=JSON.parse(e.data);
+      if(d.type==='log'){ log2(d.msg); }
+      else if(d.type==='spec'){ drawChart(d.data); }
+    };
+    ws.onclose=function(){ setTimeout(initWS,3000); };
+  }catch(e){ console.log('WS error',e); }
+}
 
 function build(){var m=document.getElementById('menu'),h='';for(var i=0;i<items.length;i++){var it=items[i];var st=(it.id==='nrf')?status.nrf:(it.id==='si')?status.si:'EDU';var cls='badge '+((st==='OK')?'ok':(st==='N/A')?'na':'edu');var s=(i===cur&&!inSub)?' sel':'';h+='<div class="menu-item'+s+'" onclick="pick('+i+')"><span>'+it.label+'</span><span class="'+cls+'">'+st+'</span></div>';}m.innerHTML=h;}
 function pick(i){cur=i;sel();}
@@ -310,7 +370,7 @@ function up(){if(inSub)return;do{cur=(cur-1+items.length)%items.length;}while(!i
 function down(){if(inSub)return;do{cur=(cur+1)%items.length;}while(!items[cur].en);build();}
 function sel(){if(inSub)return;show(items[cur].v);}
 function show(id){var vs=document.getElementsByClassName('view');for(var i=0;i<vs.length;i++)vs[i].className='view';var el=document.getElementById(id);if(el)el.className='view on';document.getElementById('oled').style.display='none';document.getElementById('nav').style.display='none';inSub=true;if(id==='v_spec')initChart();}
-function home(){stopSpec();stopRSSI();stopListen();var vs=document.getElementsByClassName('view');for(var i=0;i<vs.length;i++)vs[i].className='view';document.getElementById('oled').style.display='block';document.getElementById('nav').style.display='flex';inSub=false;refresh();}
+function home(){stopSpec();stopRSSI();stopListen();stopSigGen();var vs=document.getElementsByClassName('view');for(var i=0;i<vs.length;i++)vs[i].className='view';document.getElementById('oled').style.display='block';document.getElementById('nav').style.display='flex';inSub=false;refresh();}
 function cmd(url){fetch(url).then(r=>r.text()).then(t=>{var a=document.querySelector('.view.on .log');if(a){a.innerHTML+=t+'\n';a.scrollTop=a.scrollHeight;}}).catch(()=>{});}
 function log2(msg){var a=document.querySelector('.view.on .log');if(a){a.innerHTML+=msg+'\n';a.scrollTop=a.scrollHeight;}}
 function refresh(){fetch('/status').then(r=>r.json()).then(d=>{status=d;document.getElementById('led').className='led '+((d.nrf==='OK'||d.si==='OK')?'green':'red');document.getElementById('st').innerText='NRF24: '+d.nrf+' | SI4432: '+d.si;if(d.device_name)document.getElementById('dName').innerText=d.device_name;build();}).catch(()=>{});}
@@ -325,6 +385,13 @@ function stopRSSI(){if(rssiTimer){clearInterval(rssiTimer);rssiTimer=null;}}
 
 function applyMod(){var v=document.getElementById('modSel').value;fetch('/si_set_mod?mod='+v).then(r=>r.text()).then(t=>log2(t));}
 function applyDR(){var v=document.getElementById('drSel').value;fetch('/si_set_dr?dr='+v).then(r=>r.text()).then(t=>log2(t));}
+
+function startSigGen(){
+  var f=document.getElementById('genFreq').value;
+  var p=document.getElementById('genPattern').value;
+  fetch('/siggen_start?freq='+f+'&pattern='+p).then(r=>r.text()).then(t=>log2(t));
+}
+function stopSigGen(){fetch('/siggen_stop').then(r=>r.text()).then(t=>log2(t));}
 
 function toggleListen(){if(listening){stopListen();}else{startListen();}}
 function startListen(){
@@ -433,7 +500,7 @@ function saveConfig(){var t=document.getElementById('cfgText').value;fetch('/con
 function resetConfig(){fetch('/config_reset').then(r=>r.text()).then(x=>{log2(x);setTimeout(()=>location.reload(),2500);});}
 function reboot(){if(confirm('ری‌استارت؟'))fetch('/sys_reboot');}
 
-build();refresh();setInterval(refresh,5000);
+build();refresh();setInterval(refresh,5000);initWS();
 </script>
 </body>
 </html>
@@ -466,6 +533,10 @@ void applyConfig(const String& json) {
     }
   }
   if (doc.containsKey("rssi")) cfg_rssi_samples = doc["rssi"]["samples"] | 10;
+  if (doc.containsKey("mqtt")) {
+    cfg_mqtt_server = String((const char*)(doc["mqtt"]["server"] | "192.168.1.100"));
+    cfg_mqtt_port   = doc["mqtt"]["port"] | 1883;
+  }
   Serial.println("Config applied");
 }
 
@@ -475,7 +546,8 @@ String buildDefaultConfig() {
   j += "\"nrf\":{\"data_rate\":250,\"pa_level\":2,\"channel\":76,\"address\":\"HIZ01\"},";
   j += "\"si4432\":{\"frequency\":433.92,\"data_rate\":2.4,\"output_power\":10,";
   j += "\"modulation\":\"OOK\",\"spectrum\":{\"start_freq\":430,\"end_freq\":440,\"step\":1}},";
-  j += "\"rssi\":{\"samples\":10}}";
+  j += "\"rssi\":{\"samples\":10},";
+  j += "\"mqtt\":{\"server\":\"192.168.1.100\",\"port\":1883}}";
   return j;
 }
 
@@ -489,12 +561,32 @@ void loadConfig() {
   if (f) { String c = f.readString(); f.close(); applyConfig(c); }
 }
 
+// ========== MQTT ==========
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("MQTT msg: "); Serial.println(topic);
+}
+
+void mqttReconnect() {
+  if (!mqttClient.connected()) {
+    String clientId = "HIZMOS-" + String(random(0xffff), HEX);
+    if (mqttClient.connect(clientId.c_str())) {
+      mqttClient.subscribe("hizmos/cmd");
+      Serial.println("MQTT connected");
+    }
+  }
+}
+
+void mqttPublish(const String& topic, const String& payload) {
+  if (mqttClient.connected()) mqttClient.publish(topic.c_str(), payload.c_str());
+}
+
 // ========== Detection ==========
 bool detect_nrf() {
   if (radio_nrf.begin()) {
     radio_nrf.openWritingPipe((const byte*)cfg_nrf_address.c_str());
     radio_nrf.setPALevel(cfg_nrf_pa_level);
-    uint8_t dr = (cfg_nrf_data_rate==250)?RF24_250KBPS:(cfg_nrf_data_rate==1000)?RF24_1MBPS:RF24_2MBPS;
+    rf24_datarate_e dr = (cfg_nrf_data_rate == 250) ? RF24_250KBPS :
+                         (cfg_nrf_data_rate == 1000) ? RF24_1MBPS : RF24_2MBPS;
     radio_nrf.setDataRate(dr);
     radio_nrf.setChannel(cfg_nrf_channel);
     return true;
@@ -503,13 +595,20 @@ bool detect_nrf() {
 }
 
 bool detect_si4432() {
-  hspi.begin(HSPI_SCK, HSPI_MISO, HSPI_MOSI, SI4432_CS);
+  SPI.begin(HSPI_SCK, HSPI_MISO, HSPI_MOSI, SI4432_CS);
   int st = radio_si.begin(cfg_si_freq);
   if (st == RADIOLIB_ERR_NONE) {
     radio_si.setOutputPower(cfg_si_power);
-    radio_si.setOOK(cfg_si_modulation == "OOK");
+    if (cfg_si_modulation == "OOK") radio_si.setModulation(RADIOLIB_SI443X_MODULATION_OOK);
+    else if (cfg_si_modulation == "GFSK") radio_si.setModulation(RADIOLIB_SI443X_MODULATION_GFSK);
+    else radio_si.setModulation(RADIOLIB_SI443X_MODULATION_FSK);
     return true;
   }
+  return false;
+}
+
+bool detect_sd() {
+  if (SD.begin(SD_CS)) return true;
   return false;
 }
 
@@ -542,7 +641,6 @@ void rawProcessCapture() {
 
 void rawReplaySignal() {
   if (rawPulseCount == 0 || !si_ok) return;
-  radio_si.setOOK(true);
   radio_si.setFrequency(cfg_si_freq);
   radio_si.setBitRate(2.4);
   radio_si.transmitDirect();
@@ -556,11 +654,42 @@ void rawReplaySignal() {
   radio_si.standby();
 }
 
+// ========== Signal Generator ==========
+bool sigGenActive = false;
+String sigGenPattern = "1010101010101010";
+float sigGenFreq = 433.92;
+int sigGenIndex = 0;
+
+void startSigGen(float freq, const String& pattern) {
+  if (!si_ok) return;
+  sigGenFreq = freq;
+  sigGenPattern = pattern;
+  sigGenIndex = 0;
+  sigGenActive = true;
+  radio_si.setFrequency(sigGenFreq);
+  radio_si.setBitRate(2.4);
+  radio_si.transmitDirect();
+}
+
+void stopSigGen() {
+  sigGenActive = false;
+  digitalWrite(SI4432_SDN, LOW);
+  if (si_ok) radio_si.standby();
+}
+
+void processSigGen() {
+  if (!sigGenActive || sigGenPattern.length() == 0) return;
+  char c = sigGenPattern[sigGenIndex];
+  digitalWrite(SI4432_SDN, c == '1' ? HIGH : LOW);
+  delayMicroseconds(500);
+  sigGenIndex = (sigGenIndex + 1) % sigGenPattern.length();
+}
+
 // ========== Setup ==========
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== HIZMOS v5.0 ===");
+  Serial.println("\n=== HIZMOS v6.0 ===");
 
   pinMode(SI4432_RX_DATA, INPUT);
   pinMode(SI4432_SDN, OUTPUT);
@@ -570,10 +699,27 @@ void setup() {
 
   nrf_ok = detect_nrf();
   si_ok  = detect_si4432();
-  Serial.printf("[NRF24] %s  [SI4432] %s\n", nrf_ok?"OK":"N/A", si_ok?"OK":"N/A");
+  sd_ok  = detect_sd();
+  Serial.printf("[NRF24] %s  [SI4432] %s  [SD] %s\n", nrf_ok?"OK":"N/A", si_ok?"OK":"N/A", sd_ok?"OK":"N/A");
 
   WiFi.softAP(cfg_ap_ssid.c_str(), cfg_ap_password.c_str());
   Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
+
+  // MQTT
+  mqttClient.setServer(cfg_mqtt_server.c_str(), cfg_mqtt_port);
+  mqttClient.setCallback(mqttCallback);
+
+  // WebSocket
+  webSocket.begin();
+  webSocket.onEvent([](uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+    if (type == WStype_TEXT) {
+      String msg = String((char*)payload);
+      Serial.printf("WS[%u]: %s\n", num, msg.c_str());
+    }
+  });
+
+  // BLE
+  NimBLEDevice::init("HIZMOS-BLE");
 
   server.on("/", HTTP_GET, [](){ server.send_P(200, "text/html", HTML_PAGE); });
   server.on("/status", HTTP_GET, [](){
@@ -581,6 +727,7 @@ void setup() {
     server.send(200, "application/json", j);
   });
 
+  // ... (تمام endpointهای قبلی)
   server.on("/nrf_info", HTTP_GET, [](){
     if(!nrf_ok){ server.send(200,"text/plain","NRF24 N/A\n"); return; }
     String r = "=== NRF24 ===\nChannel: " + String(cfg_nrf_channel) + "\nAddress: " + cfg_nrf_address + "\nRate: " + String(cfg_nrf_data_rate) + " kbps\n";
@@ -615,7 +762,11 @@ void setup() {
   server.on("/si_set_mod", HTTP_GET, [](){
     if(server.hasArg("mod")){
       cfg_si_modulation = server.arg("mod");
-      if(si_ok) radio_si.setOOK(cfg_si_modulation == "OOK");
+      if(si_ok) {
+        if (cfg_si_modulation == "OOK") radio_si.setModulation(RADIOLIB_SI443X_MODULATION_OOK);
+        else if (cfg_si_modulation == "GFSK") radio_si.setModulation(RADIOLIB_SI443X_MODULATION_GFSK);
+        else radio_si.setModulation(RADIOLIB_SI443X_MODULATION_FSK);
+      }
       server.send(200,"text/plain","Mod: " + cfg_si_modulation + "\n");
     } else server.send(400,"text/plain","Missing");
   });
@@ -682,9 +833,8 @@ void setup() {
   server.on("/raw_capture", HTTP_GET, [](){
     if(!si_ok){ server.send(503,"text/plain","SI4432 N/A"); return; }
     radio_si.setFrequency(cfg_si_freq);
-    radio_si.setOOK(true);
     radio_si.setBitRate(2.4);
-    radio_si.setDirectMode(true, SI4432_RX_DATA);
+    radio_si.receiveDirect();
     rawCaptureDuration = 2000;
     rawStartCapture();
     server.send(200,"text/plain","Recording 2s...");
@@ -739,6 +889,55 @@ void setup() {
     server.send(200,"text/plain","Cleared\n");
   });
 
+  // --- WiFi Scan ---
+  server.on("/wifi_scan", HTTP_GET, [](){
+    int n = WiFi.scanNetworks();
+    String r = "=== WiFi Scan (" + String(n) + " networks) ===\n";
+    for (int i = 0; i < n; i++) {
+      r += String(i+1) + ". " + WiFi.SSID(i) + " (" + WiFi.RSSI(i) + " dBm) CH" + WiFi.channel(i) + "\n";
+    }
+    server.send(200,"text/plain", r);
+  });
+
+  // --- BLE Scan ---
+  server.on("/ble_scan", HTTP_GET, [](){
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    pScan->setActiveScan(true);
+    NimBLEScanResults results = pScan->start(3);
+    String r = "=== BLE Scan (" + String(results.getCount()) + " devices) ===\n";
+    for (int i = 0; i < results.getCount(); i++) {
+      NimBLEAdvertisedDevice dev = results.getDevice(i);
+      r += dev.getAddress().toString().c_str() + String(" RSSI:") + String(dev.getRSSI()) + "\n";
+    }
+    server.send(200,"text/plain", r);
+  });
+
+  // --- Signal Generator ---
+  server.on("/siggen_start", HTTP_GET, [](){
+    if(server.hasArg("freq") && server.hasArg("pattern")){
+      float f = server.arg("freq").toFloat();
+      String p = server.arg("pattern");
+      startSigGen(f, p);
+      server.send(200,"text/plain","Signal Gen started\n");
+    } else server.send(400,"text/plain","Missing args");
+  });
+  server.on("/siggen_stop", HTTP_GET, [](){
+    stopSigGen();
+    server.send(200,"text/plain","Signal Gen stopped\n");
+  });
+
+  // --- MQTT ---
+  server.on("/mqtt_status", HTTP_GET, [](){
+    String r = "MQTT: " + String(mqttClient.connected() ? "Connected" : "Disconnected") + "\n";
+    r += "Server: " + cfg_mqtt_server + ":" + String(cfg_mqtt_port) + "\n";
+    server.send(200,"text/plain", r);
+  });
+  server.on("/mqtt_publish", HTTP_GET, [](){
+    mqttPublish("hizmos/status", "{\"device\":\"HIZMOS\",\"status\":\"ok\"}");
+    server.send(200,"text/plain","Published\n");
+  });
+
+  // --- Config ---
   server.on("/config_get", HTTP_GET, [](){
     if(LittleFS.exists("/config.json")){
       File f = LittleFS.open("/config.json","r");
@@ -767,6 +966,7 @@ void setup() {
     delay(2000); ESP.restart();
   });
 
+  // --- System ---
   server.on("/sys_info", HTTP_GET, [](){
     String r = "=== System ===\nChip: " + String(ESP.getChipModel()) + "\nCPU: " + String(ESP.getCpuFreqMHz()) + " MHz\nFree Heap: " + String(ESP.getFreeHeap()) + "\nUptime: " + String(millis()/1000) + " s\n";
     server.send(200,"text/plain", r);
@@ -776,6 +976,7 @@ void setup() {
     delay(500); ESP.restart();
   });
 
+  // --- OTA ---
   server.on("/update", HTTP_GET, [](){
     String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
     h += "<style>body{font-family:Tahoma;background:#0a0a0f;color:#eee;padding:20px;text-align:center}";
@@ -808,6 +1009,12 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  webSocket.loop();
   rawProcessCapture();
+  processSigGen();
+  if (WiFi.status() == WL_CONNECTED || WiFi.softAPgetStationNum() > 0) {
+    mqttReconnect();
+    mqttClient.loop();
+  }
   delay(1);
 }
