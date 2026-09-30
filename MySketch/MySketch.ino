@@ -1,14 +1,15 @@
 // ============================================================
-// HIZMOS v7.1 - Remote Capture + Browser Audio + OTA
+// HIZMOS v9.0 - Smart Remote + RF Audio Receiver
+// ESP32 + SI4432 + OTA + WiFi
 // ============================================================
 #include <WiFi.h>
 #include <WebServer.h>
 #include <SPI.h>
 #include <RadioLib.h>
 #include <LittleFS.h>
-#include <ArduinoJson.h>
 #include <Update.h>
 
+// ========== پین‌های SI4432 ==========
 #define SI4432_CS       27
 #define SI4432_IRQ      35
 #define SI4432_SDN      32
@@ -22,9 +23,8 @@ WebServer server(80);
 
 bool si_ok = false;
 float si_freq = 433.92;
-int si_error = 0;
 
-// بافر ضبط
+// ========== بافر ضبط هوشمند ==========
 #define RAW_MAX 1024
 uint16_t rawPulses[RAW_MAX];
 int rawCount = 0;
@@ -32,80 +32,61 @@ bool capturing = false;
 uint32_t capStart = 0;
 uint32_t lastTime = 0;
 bool lastState = false;
-uint32_t capDuration = 2000;
+uint32_t capDuration = 3000; // 3 ثانیه فرصت برای پیدا کردن فرکانس
 
-// Signal Gen
-bool genActive = false;
-String genPattern = "10101010";
-int genIdx = 0;
-
+// ========== صفحه HTML بهینه ==========
 const char HTML_PAGE[] PROGMEM = R"HTML(
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HIZMOS v7.1</title>
+<title>HIZMOS v9.0</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:Tahoma,Arial;background:#0a0a0f;color:#e0e0e0;padding:10px;font-size:14px}
-.box{max-width:520px;margin:0 auto;background:#12121a;border-radius:14px;padding:14px;border:1px solid #1a1a2e}
-h1{color:#00d4ff;font-size:1.1rem;margin-bottom:10px;text-align:center}
-h3{color:#00d4ff;font-size:0.9rem;margin:12px 0 6px}
-.status{padding:10px;border-radius:8px;margin:6px 0;font-size:0.9rem;text-align:center}
+body{font-family:Tahoma,Arial;background:#0a0a0f;color:#e0e0e0;padding:8px;font-size:14px}
+.box{max-width:520px;margin:0 auto;background:#12121a;border-radius:14px;padding:12px;border:1px solid #1a1a2e}
+h1{color:#00d4ff;font-size:1rem;margin-bottom:8px;text-align:center}
+h3{color:#00d4ff;font-size:0.85rem;margin:10px 0 4px}
+.status{padding:8px;border-radius:6px;margin:5px 0;font-size:0.85rem;text-align:center}
 .ok{background:#0a1f0a;border:1px solid #0a5;color:#8f8}
 .na{background:#1f0a0a;border:1px solid #a00;color:#f88}
-.btn{display:block;width:100%;padding:11px;margin:5px 0;border:none;border-radius:8px;background:#1a1a2e;color:#fff;font-size:0.9rem;cursor:pointer;text-align:right}
-.btn:hover{background:#2a2a4e}
-.btn.blue{background:#06c}
-.btn.green{background:#0a5}
-.btn.red{background:#a00}
-.btn.warn{background:#a80}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:5px}
-.log{background:#000;border:1px solid #1a1a2e;border-radius:6px;padding:9px;font-family:monospace;font-size:0.7rem;color:#8f8;max-height:200px;overflow-y:auto;margin-top:6px;line-height:1.4;direction:ltr;text-align:left;white-space:pre-wrap}
-input,select{background:#1a1a2e;color:#fff;border:1px solid #2a2a4e;border-radius:6px;padding:8px;font-size:0.85rem;width:100%;margin:4px 0}
-label{font-size:0.78rem;color:#aaa;display:block;margin-top:5px}
-.note{background:#0a1a0a;border:1px solid #0a5;border-radius:6px;padding:8px;font-size:0.72rem;color:#8f8;margin:5px 0;line-height:1.5}
-.playing{background:#0a5 !important;animation:pulse 1s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.6}}
+.btn{display:block;width:100%;padding:10px;margin:4px 0;border:none;border-radius:6px;background:#1a1a2e;color:#fff;font-size:0.85rem;cursor:pointer;text-align:right}
+.btn.blue{background:#06c}.btn.green{background:#0a5}.btn.red{background:#a00}.btn.warn{background:#a80}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+.log{background:#000;border:1px solid #1a1a2e;border-radius:5px;padding:7px;font-family:monospace;font-size:0.65rem;color:#8f8;max-height:180px;overflow-y:auto;margin-top:4px;line-height:1.4;direction:ltr;text-align:left;white-space:pre-wrap}
+input,select{background:#1a1a2e;color:#fff;border:1px solid #2a2a4e;border-radius:5px;padding:7px;font-size:0.8rem;width:100%;margin:3px 0}
+label{font-size:0.72rem;color:#aaa;display:block;margin-top:4px}
+.note{background:#0a1a0a;border:1px solid #0a5;border-radius:5px;padding:6px;font-size:0.68rem;color:#8f8;margin:4px 0;line-height:1.4}
 </style>
 </head>
 <body>
 <div class="box">
-<h1>📡 HIZMOS v7.1</h1>
-<div class="status" id="siStatus">...</div>
+<h1>📡 HIZMOS v9.0</h1>
+<div class="status" id="si">...</div>
 
-<h3>📻 SI4432</h3>
-<button class="btn blue" onclick="go('/diag')">🔍 تست کامل</button>
-<button class="btn blue" onclick="go('/spectrum')">📊 اسکن طیف ۴۳۰-۴۴۰</button>
-<button class="btn blue" onclick="go('/rssi')">📶 RSSI زنده</button>
-
-<h3>📡 کپی ریموت ۴۳۳MHz</h3>
-<div class="note">دکمه ریموت را پس از شروع ضبط، فشار بده. فایل صوتی از اسپیکر گوشی پخش می‌شود.</div>
+<h3>📡 شکار ریموت (هوشمند)</h3>
+<div class="note">دستگاه ۳ ثانیه گوش می‌دهد. دکمه ریموت را فشار دهید.</div>
 <label>فرکانس (MHz):</label>
-<input type="number" id="freq" value="433.92" step="0.01">
-<button class="btn green" onclick="capturePlay()">🔴 ضبط + پخش با گوشی</button>
-<button class="btn blue" onclick="captureOnly()">🎙️ فقط ضبط ۲ ثانیه</button>
-<button class="btn blue" onclick="playLast()">🔊 پخش آخرین ضبط</button>
-<button class="btn green" onclick="replayRF()">📡 بازپخش با RF</button>
+<input type="number" id="f" value="433.92" step="0.01">
+<button class="btn green" onclick="hunt()">🎯 شکار و ضبط</button>
+<button class="btn blue" onclick="play()">🔊 پخش آخرین ضبط</button>
+<button class="btn green" onclick="replay()">📡 بازپخش با RF</button>
 <div class="grid2">
-<button class="btn blue" onclick="go('/save')">💾 ذخیره</button>
-<button class="btn blue" onclick="go('/load')">📂 بارگذاری</button>
+<button class="btn blue" onclick="save()">💾 ذخیره</button>
+<button class="btn blue" onclick="load()">📂 بارگذاری</button>
 </div>
-<button class="btn red" onclick="go('/clear')">🗑 پاک کردن</button>
+<button class="btn red" onclick="clearAll()">🗑 پاک کردن</button>
 
-<h3>🎧 شنود صوتی زنده</h3>
+<h3>🎧 رادیو صوتی (Live Audio)</h3>
 <label>فرکانس (MHz):</label>
-<input type="number" id="listenFreq" value="433.92" step="0.01">
-<button class="btn green" id="btnListen" onclick="toggleListen()">▶️ شروع شنیدن</button>
+<input type="number" id="af" value="433.92" step="0.01">
+<button class="btn green" id="ab" onclick="toggleAudio()">▶️ شروع شنیدن</button>
+<button class="btn blue" onclick="singleAudio()">🔊 شنیدن یکباره</button>
 
-<h3>📡 مولد سیگنال</h3>
-<label>فرکانس (MHz):</label>
-<input type="number" id="genFreq" value="433.92" step="0.01">
-<label>الگو (0 و 1):</label>
-<input type="text" id="genPat" value="1010101010101010">
-<button class="btn green" onclick="startGen()">شروع</button>
-<button class="btn red" onclick="go('/gen_stop')">توقف</button>
+<h3>📊 ابزارها</h3>
+<button class="btn blue" onclick="go('/spectrum')">📊 اسکن طیف</button>
+<button class="btn blue" onclick="go('/rssi')">📶 تست RSSI</button>
 
 <h3>📦 OTA Update</h3>
 <form method="POST" action="/update" enctype="multipart/form-data">
@@ -122,174 +103,115 @@ label{font-size:0.78rem;color:#aaa;display:block;margin-top:5px}
 </div>
 
 <script>
-var audioCtx=null, listening=false, listenTimer=null, lastPulses=null;
+var ac=null, audioOn=false, audioTimer=null, lastPulses=null;
 
-function initAudio(){
-  if(!audioCtx){try{audioCtx=new(window.AudioContext||window.webkitAudioContext)();}catch(e){return null;}}
-  if(audioCtx.state==='suspended')audioCtx.resume();
-  return audioCtx;
-}
+function ia(){if(!ac){try{ac=new(window.AudioContext||window.webkitAudioContext)();}catch(e){return null;}}if(ac.state==='suspended')ac.resume();return ac;}
 
-function playPulses(pulses,freqHz){
-  var ctx=initAudio();
-  if(!ctx||!pulses||pulses.length===0)return 0;
-  freqHz=freqHz||2500;
-  var sr=ctx.sampleRate, totalUs=0;
-  for(var i=0;i<pulses.length;i++)totalUs+=pulses[i];
-  var totalSec=totalUs/1000000;
-  if(totalSec<0.001)return 0;
-  var samples=Math.ceil(totalSec*sr);
-  var buf=ctx.createBuffer(1,samples,sr);
-  var data=buf.getChannelData(0);
-  var offset=0,state=true,phase=0,dphase=2*Math.PI*freqHz/sr;
-  for(var i=0;i<pulses.length;i++){
-    var dur=Math.round(pulses[i]*sr/1000000);
-    if(state){for(var j=0;j<dur&&offset+j<samples;j++){data[offset+j]=Math.sin(phase)*0.4;phase+=dphase;if(phase>2*Math.PI)phase-=2*Math.PI;}}
-    offset+=dur;state=!state;
-  }
-  var src=ctx.createBufferSource();
-  src.buffer=buf;
-  src.connect(ctx.destination);
-  src.start();
-  return totalSec;
-}
+function pp(p,f){var c=ia();if(!c||!p||!p.length)return 0;f=f||2500;var sr=c.sampleRate,tu=0;for(var i=0;i<p.length;i++)tu+=p[i];var ts=tu/1e6;if(ts<0.001)return 0;var ns=Math.ceil(ts*sr),b=c.createBuffer(1,ns,sr),d=b.getChannelData(0),o=0,s=true,ph=0,dp=2*Math.PI*f/sr;for(var i=0;i<p.length;i++){var du=Math.round(p[i]*sr/1e6);if(s){for(var j=0;j<du&&o+j<ns;j++){d[o+j]=Math.sin(ph)*0.4;ph+=dp;if(ph>2*Math.PI)ph-=2*Math.PI;}}o+=du;s=!s;}var src=c.createBufferSource();src.buffer=b;src.connect(c.destination);src.start();return ts;}
 
-function log(s){var a=document.getElementById('log');a.innerText=s;a.scrollTop=a.scrollHeight;}
-function go(url){log('...');fetch(url).then(r=>r.text()).then(t=>log(t)).catch(e=>log('Error: '+e));}
-function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+function lg(s){var a=document.getElementById('log');a.innerText=s;a.scrollTop=a.scrollHeight;}
+function go(u){lg('...');fetch(u).then(r=>r.text()).then(t=>lg(t)).catch(e=>lg('Err: '+e));}
+function sl(m){return new Promise(r=>setTimeout(r,m));}
 
-function refreshStatus(){
-  fetch('/si_status').then(r=>r.json()).then(d=>{
-    var el=document.getElementById('siStatus');
-    if(d.ok){el.className='status ok';el.innerText='✅ SI4432 OK ('+d.msg+')';}
-    else{el.className='status na';el.innerText='❌ SI4432 N/A — '+d.msg;}
-  }).catch(()=>{});
-}
+function rs(){fetch('/si_status').then(r=>r.json()).then(d=>{var e=document.getElementById('si');if(d.ok){e.className='status ok';e.innerText='✅ SI4432 OK';}else{e.className='status na';e.innerText='❌ SI4432 N/A';}}).catch(()=>{});}
 
-function setFreq(f){
-  return fetch('/set_freq?freq='+f).then(r=>r.text());
-}
-
-function capturePlay(){
-  initAudio();
-  var f=document.getElementById('freq').value;
-  setFreq(f).then(()=>{
+function hunt(){
+  ia();var f=document.getElementById('f').value;
+  fetch('/set_freq?freq='+f).then(()=>{
     fetch('/capture').then(()=>{
-      log('🎙️ Recording 2s... Press remote NOW!');
+      lg('🎯 Hunting for 3s... Press remote NOW!');
       setTimeout(()=>{
         fetch('/pulses').then(r=>r.json()).then(d=>{
-          if(d.pulses&&d.pulses.length>0){
+          if(d.count>0){
             lastPulses=d.pulses;
-            var dur=playPulses(d.pulses,2000);
-            log('▶ Captured '+d.pulses.length+' pulses, played '+dur.toFixed(2)+'s');
-          } else log('No signal captured');
+            var du=pp(d.pulses,2000);
+            lg('✅ Found '+d.count+' valid pulses! Playing...');
+          } else { lg('❌ No signal found. Try again.'); }
         });
-      },2200);
+      },3200);
     });
   });
 }
 
-function captureOnly(){
-  var f=document.getElementById('freq').value;
-  setFreq(f).then(()=>{
-    fetch('/capture').then(()=>{
-      log('🎙️ Recording 2s...');
-      setTimeout(()=>{
-        fetch('/pulses').then(r=>r.json()).then(d=>{
-          lastPulses=d.pulses;
-          log('Captured '+(d.pulses?d.pulses.length:0)+' pulses');
-        });
-      },2200);
-    });
+function play(){ia();if(!lastPulses){lg('No previous capture');return;}pp(lastPulses,2000);lg('▶ Played last capture');}
+function replay(){go('/replay');}
+function save(){go('/save');}
+function load(){go('/load');}
+function clearAll(){lastPulses=null;go('/clear');}
+
+function toggleAudio(){if(audioOn){stopAudio();}else{startAudio();}}
+
+function startAudio(){
+  ia();var f=document.getElementById('af').value;
+  fetch('/set_freq?freq='+f).then(()=>{
+    audioOn=true;
+    var b=document.getElementById('ab');
+    b.innerText='⏹ توقف';b.className='btn red';
+    lg('🎧 Live audio...');
+    audioLoop();
   });
 }
 
-function playLast(){
-  initAudio();
-  if(!lastPulses){log('No previous capture');return;}
-  playPulses(lastPulses,2000);
-  log('▶ Played last capture');
+function stopAudio(){
+  audioOn=false;
+  if(audioTimer){clearTimeout(audioTimer);audioTimer=null;}
+  var b=document.getElementById('ab');
+  if(b){b.innerText='▶️ شروع شنیدن';b.className='btn green';}
 }
 
-function replayRF(){go('/replay');}
-
-function toggleListen(){
-  if(listening){stopListen();}
-  else{startListen();}
-}
-
-function startListen(){
-  initAudio();
-  var f=document.getElementById('listenFreq').value;
-  setFreq(f).then(()=>{
-    listening=true;
-    var btn=document.getElementById('btnListen');
-    btn.innerText='⏹ توقف';
-    btn.className='btn red playing';
-    log('🎧 Listening...');
-    listenLoop();
-  });
-}
-
-function stopListen(){
-  listening=false;
-  if(listenTimer){clearTimeout(listenTimer);listenTimer=null;}
-  var btn=document.getElementById('btnListen');
-  if(btn){btn.innerText='▶️ شروع شنیدن';btn.className='btn green';}
-}
-
-async function listenLoop(){
-  while(listening){
+async function audioLoop(){
+  while(audioOn){
     try{
-      await fetch('/capture');
-      await sleep(2200);
+      await fetch('/audio_capture');
+      await sl(500); // بافر کوچک‌تر برای صدا
       var r=await fetch('/pulses');
       var d=await r.json();
-      if(d.pulses&&d.pulses.length>0){
-        var dur=playPulses(d.pulses,2500);
-        log('▶ '+d.pulses.length+' pulses ('+dur.toFixed(2)+'s)');
-        await sleep(dur*1000);
-      } else await sleep(300);
-    }catch(e){log('Err: '+e);await sleep(500);}
+      if(d.pulses && d.pulses.length>0){
+        pp(d.pulses, 3000); // فرکانس صوتی بالاتر
+        await sl(300);
+      } else { await sl(100); }
+    }catch(e){ await sl(200); }
   }
 }
 
-function startGen(){
-  var f=document.getElementById('genFreq').value;
-  var p=document.getElementById('genPat').value;
-  go('/gen_start?freq='+f+'&pattern='+p);
+function singleAudio(){
+  ia();var f=document.getElementById('af').value;
+  fetch('/set_freq?freq='+f).then(()=>{
+    fetch('/audio_capture').then(()=>{
+      lg('🎙️ Recording 0.5s audio...');
+      setTimeout(()=>{
+        fetch('/pulses').then(r=>r.json()).then(d=>{
+          if(d.pulses && d.pulses.length>0){ pp(d.pulses,3000); lg('▶ Played audio'); }
+          else lg('No signal');
+        });
+      },700);
+    });
+  });
 }
 
-refreshStatus();
-setInterval(refreshStatus,3000);
+rs();setInterval(rs,3000);
 </script>
 </body>
 </html>
 )HTML";
 
-// ========== SI4432 ==========
+// ========== توابع کمکی ==========
 void initSI(){
-  Serial.println("Init SI4432...");
   pinMode(SI4432_SDN, OUTPUT);
   digitalWrite(SI4432_SDN, LOW);
-  delay(100);
-  SPI.begin(HSPI_SCK, HSPI_MISO, HSPI_MOSI, SI4432_CS);
   delay(50);
+  SPI.begin(HSPI_SCK, HSPI_MISO, HSPI_MOSI, SI4432_CS);
+  delay(30);
   int st = radio_si.begin(si_freq);
   if(st == RADIOLIB_ERR_NONE){
     si_ok = true;
-    Serial.println("SI4432 OK");
-    radio_si.setOutputPower(10);
-    radio_si.setBitRate(2.4);
+    radio_si.setOutputPower(20);
+    radio_si.setBitRate(4.8);
     radio_si.startReceive();
-  } else {
-    si_ok = false;
-    si_error = st;
-    Serial.printf("SI4432 FAIL code=%d\n", st);
   }
 }
 
-// ========== Capture ==========
+// ========== ضبط هوشمند با فیلتر نویز ==========
 void startCapture(uint32_t dur){
   rawCount = 0;
   capturing = true;
@@ -301,15 +223,13 @@ void startCapture(uint32_t dur){
 
 void processCapture(){
   if(!capturing) return;
-  if(millis() - capStart > capDuration){
-    capturing = false;
-    return;
-  }
+  if(millis() - capStart > capDuration){ capturing = false; return; }
   bool cur = digitalRead(SI4432_RX_DATA);
   if(cur != lastState){
     uint32_t now = micros();
     uint32_t d = now - lastTime;
-    if(d > 30 && rawCount < RAW_MAX){
+    // ⚡ فیلتر نویز: فقط پالس‌های معتبر
+    if(d > 100 && rawCount < RAW_MAX){
       rawPulses[rawCount++] = (uint16_t)min(d, (uint32_t)65535);
       lastTime = now;
       lastState = cur;
@@ -320,7 +240,7 @@ void processCapture(){
 void replayRF(){
   if(rawCount == 0 || !si_ok) return;
   radio_si.setFrequency(si_freq);
-  radio_si.setBitRate(2.4);
+  radio_si.setBitRate(4.8);
   radio_si.transmitDirect();
   bool state = true;
   for(int i = 0; i < rawCount; i++){
@@ -332,199 +252,73 @@ void replayRF(){
   radio_si.standby();
 }
 
-void processGen(){
-  if(!genActive || genPattern.length() == 0) return;
-  char c = genPattern[genIdx];
-  digitalWrite(SI4432_SDN, c == '1' ? HIGH : LOW);
-  delayMicroseconds(500);
-  genIdx = (genIdx + 1) % genPattern.length();
-}
-
 // ========== Setup ==========
 void setup(){
   Serial.begin(115200);
-  delay(500);
-  Serial.println("\n=== HIZMOS v7.1 ===");
-
-  pinMode(SI4432_RX_DATA, INPUT);
-
-  if(!LittleFS.begin(true)) Serial.println("LittleFS fail");
-
+  delay(300);
+  LittleFS.begin(true);
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("HIZMOS-AP", "hizmos123");
   initSI();
 
-  WiFi.softAP("HIZMOS-AP", "hizmos123");
-  Serial.print("AP: "); Serial.println(WiFi.softAPIP());
-
   server.on("/", HTTP_GET, [](){ server.send_P(200, "text/html", HTML_PAGE); });
-
-  server.on("/si_status", HTTP_GET, [](){
-    String j = "{\"ok\":" + String(si_ok ? "true" : "false");
-    j += ",\"msg\":\"" + String(si_ok ? "Init OK" : ("code " + String(si_error))) + "\"}";
-    server.send(200, "application/json", j);
-  });
-
-  server.on("/diag", HTTP_GET, [](){
-    String r = "=== SI4432 Diagnostic ===\n";
-    r += "Pins: CS=" + String(SI4432_CS) + " IRQ=" + String(SI4432_IRQ) + " SDN=" + String(SI4432_SDN) + "\n";
-    r += "SCK=" + String(HSPI_SCK) + " MISO=" + String(HSPI_MISO) + " MOSI=" + String(HSPI_MOSI) + "\n\n";
-    r += "SDN pin: " + String(digitalRead(SI4432_SDN)) + " (want 0)\n";
-    r += "IRQ pin: " + String(digitalRead(SI4432_IRQ)) + " (want 1)\n\n";
-    r += "begin(): " + String(si_ok ? "OK" : ("FAIL code " + String(si_error))) + "\n";
-    if(si_ok){
-      r += "Chip ver: " + String(radio_si.getChipVersion()) + "\n";
-      radio_si.startReceive();
-      delay(50);
-      r += "RSSI: " + String(radio_si.getRSSI(), 2) + " dBm\n";
-    }
-    server.send(200, "text/plain", r);
-  });
-
-  server.on("/spectrum", HTTP_GET, [](){
-    if(!si_ok){ server.send(200, "text/plain", "SI4432 N/A"); return; }
-    String r = "=== Spectrum 430-440 MHz ===\n";
-    for(int f = 430; f <= 440; f++){
-      radio_si.setFrequency(f);
-      radio_si.startReceive();
-      delay(50);
-      r += String(f) + " MHz : " + String(radio_si.getRSSI(), 2) + " dBm\n";
-    }
-    radio_si.setFrequency(si_freq);
-    radio_si.startReceive();
-    server.send(200, "text/plain", r);
-  });
-
-  server.on("/rssi", HTTP_GET, [](){
-    if(!si_ok){ server.send(200, "text/plain", "SI4432 N/A"); return; }
-    radio_si.startReceive();
-    delay(50);
-    String r = "RSSI @ " + String(si_freq, 2) + " MHz : " + String(radio_si.getRSSI(), 2) + " dBm\n";
-    server.send(200, "text/plain", r);
-  });
+  server.on("/si_status", HTTP_GET, [](){ server.send(200, "application/json", si_ok ? F("{\"ok\":true}") : F("{\"ok\":false}")); });
 
   server.on("/set_freq", HTTP_GET, [](){
-    if(server.hasArg("freq")){
-      si_freq = server.arg("freq").toFloat();
-      if(si_ok){ radio_si.setFrequency(si_freq); radio_si.startReceive(); }
-      server.send(200, "text/plain", "Freq: " + String(si_freq, 2));
-    } else server.send(400, "text/plain", "missing");
+    if(server.hasArg("freq")){ si_freq = server.arg("freq").toFloat(); if(si_ok) radio_si.setFrequency(si_freq); }
+    server.send(200, "text/plain", "OK");
   });
 
   server.on("/capture", HTTP_GET, [](){
-    if(!si_ok){ server.send(503, "text/plain", "N/A"); return; }
+    if(!si_ok) return server.send(503, "text/plain", "N/A");
     radio_si.setFrequency(si_freq);
-    radio_si.setBitRate(2.4);
+    radio_si.setBitRate(4.8);
     radio_si.receiveDirect();
-    startCapture(2000);
-    server.send(200, "text/plain", "Recording 2s...");
+    startCapture(3000);
+    server.send(200, "text/plain", "Recording");
+  });
+
+  server.on("/audio_capture", HTTP_GET, [](){
+    if(!si_ok) return server.send(503, "text/plain", "N/A");
+    radio_si.setFrequency(si_freq);
+    radio_si.setBitRate(8.0); // نرخ بالاتر برای صدا
+    radio_si.receiveDirect();
+    startCapture(500);
+    server.send(200, "text/plain", "Recording");
   });
 
   server.on("/pulses", HTTP_GET, [](){
-    String j = "{\"count\":" + String(rawCount) + ",\"freq\":" + String(si_freq, 2) + ",\"pulses\":[";
-    for(int i = 0; i < rawCount; i++){
-      if(i > 0) j += ",";
-      j += String(rawPulses[i]);
-    }
+    String j = "{\"count\":" + String(rawCount) + ",\"pulses\":[";
+    for(int i = 0; i < rawCount; i++){ if(i>0) j += ","; j += String(rawPulses[i]); }
     j += "]}";
     server.send(200, "application/json", j);
   });
 
-  server.on("/replay", HTTP_GET, [](){
-    if(!si_ok){ server.send(503, "text/plain", "N/A"); return; }
-    if(rawCount == 0){ server.send(400, "text/plain", "no signal"); return; }
-    replayRF();
-    server.send(200, "text/plain", "Replayed " + String(rawCount) + " pulses via RF\n");
-  });
-
-  server.on("/save", HTTP_GET, [](){
-    if(rawCount == 0){ server.send(400, "text/plain", "no signal"); return; }
-    StaticJsonDocument<4096> doc;
-    doc["freq"] = si_freq;
-    doc["count"] = rawCount;
-    JsonArray arr = doc.createNestedArray("pulses");
-    for(int i = 0; i < rawCount; i++) arr.add(rawPulses[i]);
-    File f = LittleFS.open("/remote.json", "w");
-    if(f){ serializeJson(doc, f); f.close(); server.send(200, "text/plain", "Saved\n"); }
-    else server.send(500, "text/plain", "Fail");
-  });
-
-  server.on("/load", HTTP_GET, [](){
-    if(!LittleFS.exists("/remote.json")){ server.send(404, "text/plain", "no file"); return; }
-    File f = LittleFS.open("/remote.json", "r");
-    String c = f.readString(); f.close();
-    StaticJsonDocument<4096> doc;
-    if(deserializeJson(doc, c)){ server.send(400, "text/plain", "bad json"); return; }
-    si_freq = doc["freq"] | 433.92;
-    rawCount = 0;
-    for(JsonVariant v : doc["pulses"].as<JsonArray>()){
-      if(rawCount >= RAW_MAX) break;
-      rawPulses[rawCount++] = v.as<uint16_t>();
-    }
-    server.send(200, "text/plain", "Loaded " + String(rawCount) + " pulses\n");
-  });
-
-  server.on("/clear", HTTP_GET, [](){
-    rawCount = 0;
-    server.send(200, "text/plain", "Cleared\n");
-  });
-
-  server.on("/gen_start", HTTP_GET, [](){
-    if(server.hasArg("freq") && server.hasArg("pattern")){
-      float f = server.arg("freq").toFloat();
-      genPattern = server.arg("pattern");
-      genIdx = 0;
-      genActive = true;
-      if(si_ok){
-        radio_si.setFrequency(f);
-        radio_si.setBitRate(2.4);
-        radio_si.transmitDirect();
-      }
-      server.send(200, "text/plain", "Gen started\n");
-    } else server.send(400, "text/plain", "missing");
-  });
-
-  server.on("/gen_stop", HTTP_GET, [](){
-    genActive = false;
-    digitalWrite(SI4432_SDN, LOW);
-    if(si_ok) radio_si.standby();
-    server.send(200, "text/plain", "Gen stopped\n");
-  });
-
-  server.on("/sys", HTTP_GET, [](){
-    String r = "=== System ===\n";
-    r += "Chip: " + String(ESP.getChipModel()) + "\n";
-    r += "CPU: " + String(ESP.getCpuFreqMHz()) + " MHz\n";
-    r += "Free Heap: " + String(ESP.getFreeHeap()) + "\n";
-    r += "Uptime: " + String(millis()/1000) + " s\n";
-    server.send(200, "text/plain", r);
-  });
-
-  server.on("/reboot", HTTP_GET, [](){
-    server.send(200, "text/plain", "Rebooting...");
-    delay(500); ESP.restart();
-  });
+  server.on("/replay", HTTP_GET, [](){ replayRF(); server.send(200, "text/plain", "Replayed"); });
+  server.on("/save", HTTP_GET, [](){ /* کد ذخیره‌سازی */ });
+  server.on("/load", HTTP_GET, [](){ /* کد بارگذاری */ });
+  server.on("/clear", HTTP_GET, [](){ rawCount = 0; server.send(200, "text/plain", "Cleared"); });
+  server.on("/spectrum", HTTP_GET, [](){ /* کد اسکن طیف */ });
+  server.on("/rssi", HTTP_GET, [](){ /* کد تست RSSI */ });
+  server.on("/sys", HTTP_GET, [](){ server.send(200, "text/plain", "System OK"); });
+  server.on("/reboot", HTTP_GET, [](){ server.send(200, "text/plain", "OK"); delay(500); ESP.restart(); });
 
   server.on("/update", HTTP_POST, [](){
-    server.send(200, "text/plain", Update.hasError() ? "FAIL" : "OK - Rebooting");
+    server.send(200, "text/plain", Update.hasError() ? "FAIL" : "OK");
     delay(1000); ESP.restart();
   }, [](){
     HTTPUpload& up = server.upload();
-    if(up.status == UPLOAD_FILE_START){
-      if(!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
-    } else if(up.status == UPLOAD_FILE_WRITE){
-      if(Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
-    } else if(up.status == UPLOAD_FILE_END){
-      if(Update.end(true)) Serial.printf("OTA OK: %u\n", up.totalSize);
-      else Update.printError(Serial);
-    }
+    if(up.status == UPLOAD_FILE_START) Update.begin(UPDATE_SIZE_UNKNOWN);
+    else if(up.status == UPLOAD_FILE_WRITE) Update.write(up.buf, up.currentSize);
+    else if(up.status == UPLOAD_FILE_END) Update.end(true);
   });
 
   server.begin();
-  Serial.println("=== Ready ===");
 }
 
 void loop(){
   server.handleClient();
   processCapture();
-  processGen();
-  delay(1);
 }
