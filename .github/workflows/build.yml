@@ -22,14 +22,11 @@ jobs:
           arduino-cli lib install "RF24@1.4.9"
           arduino-cli lib install "RadioLib@6.5.0"
           arduino-cli lib install "ArduinoJson@6.21.3"
-          arduino-cli lib install "NimBLE-Arduino"
-          arduino-cli lib install "PubSubClient"
-          arduino-cli lib install "WebSockets"
 
-      - name: Compile for ESP32 DevKit
+      - name: Compile with OTA partition (min_spiffs)
         run: |
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32 \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" \
             --build-path build MySketch
 
       - name: Merge bin files into one
@@ -43,8 +40,10 @@ jobs:
             0xe000 "$BOOT_APP0" \
             0x10000 build/MySketch.ino.bin
 
-      - name: Upload merged firmware
+      - name: Upload all firmware files
         uses: actions/upload-artifact@v4
         with:
           name: esp32-firmware
-          path: merged-firmware.bin
+          path: |
+            merged-firmware.bin
+            build/MySketch.ino.bin
