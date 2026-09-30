@@ -2,7 +2,8 @@
  * Si4432 RF Scanner / Recorder / Replayer
  * ESP32 DevKit V1 + Si4432 (BPS1EZ - Rev B1)
  * UI: WebSocket + Mobile Browser
- * OTA: ElegantOTA (from browser)
+ * OTA: ElegantOTA (browser-based)
+ * Libs: RadioLib 6.5.0, ArduinoJson 7.2.0, ESPAsyncWebServer (ESP32Async), ElegantOTA 3.1.6
  */
 
 #include <Arduino.h>
@@ -14,7 +15,7 @@
 #include <ArduinoJson.h>
 #include <ElegantOTA.h>
 
-// ==================== پین‌های Si4432 ====================
+// ==================== پین‌ها ====================
 #define PIN_CS   5
 #define PIN_IRQ  16
 #define PIN_SDN  15
@@ -28,7 +29,7 @@ const char* STA_PASS = "YOUR_WIFI_PASSWORD";
 const char* AP_SSID  = "RF-Scanner";
 const char* AP_PASS  = "12345678";
 
-// ==================== تنظیمات اسکن ====================
+// ==================== پارامترهای اسکن ====================
 float scanStart   = 430.0;
 float scanEnd     = 440.0;
 float scanStep    = 0.1;
@@ -56,7 +57,7 @@ struct SigEntry {
 };
 
 SigEntry sigIndex[MAX_SIGNALS];
-uint16_t sigCount = 0;
+uint16_t sigCount  = 0;
 uint16_t nextSigId = 1;
 
 // ==================== وب ====================
@@ -95,7 +96,7 @@ button{flex:1;padding:14px;border:none;border-radius:10px;font-size:1em;font-wei
 </style>
 </head>
 <body>
-<h1>📡 اسکنر فرکانس Si4432</h1>
+<h1>📡 Si4432 Scanner</h1>
 
 <div class="card">
   <span class="big" id="freq">---.--</span>
@@ -114,7 +115,7 @@ button{flex:1;padding:14px;border:none;border-radius:10px;font-size:1em;font-wei
 </div>
 
 <div class="card">
-  <div style="color:#7a8ba8;font-size:.9em;margin-bottom:6px">سیگنال‌های ضبط شده</div>
+  <div style="color:#7a8ba8;font-size:.9em;margin-bottom:6px">سیگنال‌ها</div>
   <div id="list"><div class="empty">خالی</div></div>
 </div>
 
@@ -145,7 +146,7 @@ function renderList(list){
   if (!list || !list.length){ el.innerHTML = '<div class="empty">خالی</div>'; return; }
   el.innerHTML = list.map(s =>
     '<div class="signal-item"><div><div class="signal-freq">' + s.freq.toFixed(2) + ' MHz</div>' +
-    '<div class="signal-meta">' + s.len + ' بایت</div></div>' +
+    '<div class="signal-meta">' + s.len + ' bytes</div></div>' +
     '<button class="btn-replay" onclick="send(\'REPLAY:' + s.id + '\')">پخش</button></div>'
   ).join('');
 }
@@ -155,9 +156,12 @@ connect();
 </html>
 )HTMLPAGE";
 
-// ==================== اطلاع به UI ====================
+// ==================== forward declarations ====================
+void finishRecording();
+
+// ==================== اطلاع به UI (ArduinoJson v7) ====================
 void notifyScan(float freq, int rssi) {
-  StaticJsonDocument<96> doc;
+  JsonDocument doc;
   doc["type"] = "SCAN";
   doc["freq"] = freq;
   doc["rssi"] = rssi;
@@ -166,7 +170,7 @@ void notifyScan(float freq, int rssi) {
 }
 
 void notifyStatus(const String& msg) {
-  StaticJsonDocument<160> doc;
+  JsonDocument doc;
   doc["type"] = "STATUS";
   doc["msg"]  = msg;
   String out; serializeJson(doc, out);
@@ -174,11 +178,11 @@ void notifyStatus(const String& msg) {
 }
 
 void notifySignalList() {
-  StaticJsonDocument<768> doc;
+  JsonDocument doc;
   doc["type"] = "SIGNALS";
-  JsonArray arr = doc.createNestedArray("list");
+  JsonArray arr = doc["list"].to<JsonArray>();
   for (uint16_t i = 0; i < sigCount; i++) {
-    JsonObject o = arr.createNestedObject();
+    JsonObject o = arr.add<JsonObject>();
     o["id"]   = sigIndex[i].id;
     o["freq"] = sigIndex[i].freq;
     o["len"]  = sigIndex[i].len;
@@ -220,7 +224,9 @@ bool saveSignal(float freq, uint8_t* data, uint16_t len) {
   if (!f) return false;
   f.write(data, len);
   f.close();
-  sigIndex[sigCount] = { id, freq, len };
+  sigIndex[sigCount].id   = id;
+  sigIndex[sigCount].freq = freq;
+  sigIndex[sigCount].len  = len;
   sigCount++;
   saveIndex();
   return true;
@@ -246,7 +252,8 @@ bool loadSignal(uint16_t id, float* freq, uint8_t* buf, uint16_t* len) {
 // ==================== Si4432 ====================
 void initRadio() {
   Serial.print(F("[Si4432] init... "));
-  int state = radio.begin(433.0, 4.8, 5.0, 181.1, 20, 16, 0x2D, 16);
+  // RadioLib 6.5.0 Si4432::begin: (freq, br, freqDev, rxBw, power, preambleLen)
+  int state = radio.begin(433.0, 4.8, 5.0, 181.1, 20, 16);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.printf("failed, code %d\n", state);
     return;
@@ -279,7 +286,22 @@ void startRecording() {
   lastRecvTime = millis();
   radio.setFrequency(recordFreq);
   radio.startReceive();
-  notifyStatus("در حال ضبط روی " + String(recordFreq, 2) + " MHz");
+  notifyStatus("Recording @ " + String(recordFreq, 2) + " MHz");
+}
+
+void finishRecording() {
+  recording = false;
+  if (recordLen == 0) {
+    notifyStatus("داده‌ای دریافت نشد");
+    return;
+  }
+  if (saveSignal(recordFreq, recordBuf, recordLen)) {
+    notifyStatus("ذخیره شد: " + String(recordLen) + " بایت");
+    notifySignalList();
+  } else {
+    notifyStatus("حافظه پر است");
+  }
+  recordLen = 0;
 }
 
 void doRecord() {
@@ -300,32 +322,18 @@ void doRecord() {
   }
 }
 
-void finishRecording() {
-  recording = false;
-  if (recordLen == 0) {
-    notifyStatus("داده‌ای دریافت نشد");
-    return;
-  }
-  if (saveSignal(recordFreq, recordBuf, recordLen)) {
-    notifyStatus("ذخیره شد: " + String(recordLen) + " بایت");
-    notifySignalList();
-  } else {
-    notifyStatus("حافظه پر است");
-  }
-  recordLen = 0;
-}
-
 // ==================== بازپخش ====================
 void replaySignal(float freq, uint8_t* data, uint16_t len) {
   radio.setFrequency(freq);
   delay(10);
-  radio.startTransmit();
-  delay(10);
-  radio.transmit(data, len);
-  radio.finishTransmit();
+  int state = radio.transmit(data, len);
+  if (state == RADIOLIB_ERR_NONE) {
+    notifyStatus("پخش شد: " + String(freq, 2) + " MHz");
+  } else {
+    notifyStatus("خطای پخش: " + String(state));
+  }
   delay(20);
   radio.startReceive();
-  notifyStatus("پخش شد: " + String(freq, 2) + " MHz");
 }
 
 // ==================== WebSocket ====================
