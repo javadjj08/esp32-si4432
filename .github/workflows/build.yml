@@ -1,4 +1,4 @@
-name: Build HIZMOS v9.0
+name: Build SI4432 SubGHz
 
 on: [workflow_dispatch]
 
@@ -7,25 +7,50 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: arduino/setup-arduino-cli@v1
 
-      - name: Install ESP32 core
+      - name: Install arduino-cli
+        run: curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=/usr/local/bin sh
+
+      - name: Update core index
         run: |
           arduino-cli config init
           arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32@2.0.17
 
-      - name: Install libraries
+      - name: Install ESP32 core
+        run: arduino-cli core install esp32:esp32@2.0.17
+
+      - name: Install libraries from registry
         run: |
           arduino-cli lib install "RadioLib@6.5.0"
+          arduino-cli lib install "ArduinoJson@6.21.3"
+
+      - name: Install ESP32Async libraries from GitHub
+        run: |
+          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true arduino-cli lib install --git-url https://github.com/ESP32Async/AsyncTCP.git
+          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true arduino-cli lib install --git-url https://github.com/ESP32Async/ESPAsyncWebServer.git
 
       - name: Compile
         run: |
-          arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" --build-path build MySketch
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" \
+            --build-path build MySketch
 
-      - name: Upload
+      - name: Merge bin files
+        run: |
+          pip install esptool
+          BOOT_APP0=$(find ~/.arduino15 -name "boot_app0.bin" | head -n 1)
+          esptool --chip esp32 merge_bin -o merged-firmware.bin \
+            --flash_mode dio --flash_freq 40m --flash_size 4MB \
+            0x1000 build/MySketch.ino.bootloader.bin \
+            0x8000 build/MySketch.ino.partitions.bin \
+            0xe000 "$BOOT_APP0" \
+            0x10000 build/MySketch.ino.bin
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: hizmos-firmware
-          path: build/MySketch.ino.bin
+          name: si4432-firmware
+          path: |
+            merged-firmware.bin
+            build/MySketch.ino.bin
