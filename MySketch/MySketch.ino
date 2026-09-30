@@ -1,7 +1,6 @@
 // ============================================================
-// HIZMOS Complete Firmware v6.0
+// HIZMOS Complete Firmware v6.1
 // ESP32 + NRF24L01 + SI4432 + Browser Audio + Remote Capture
-// + WiFi Scan, BLE Scan, Spectrum, Signal Gen, MQTT, WebSocket
 // ============================================================
 #include <WiFi.h>
 #include <WebServer.h>
@@ -68,7 +67,7 @@ bool rawLastState = false;
 uint32_t rawCaptureStart = 0;
 uint32_t rawCaptureDuration = 2000;
 
-// ========== HTML Page (Embedded) ==========
+// ========== صفحه HTML ==========
 const char HTML_PAGE[] PROGMEM = R"HTMLPAGE(
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
@@ -169,6 +168,7 @@ label{font-size:0.78rem;color:#aaa;display:block;margin-top:6px}
   <div class="view" id="v_mod">
     <button class="back" onclick="show('v_si')">بازگشت</button>
     <h3>مدولاسیون</h3>
+    <div class="note">⚠️ تنظیم مدولاسیون در نسخه فعلی RadioLib غیرفعال است. چیپ روی مدولاسیون پیش‌فرض کار می‌کند.</div>
     <select id="modSel"><option>FSK</option><option>GFSK</option><option selected>OOK</option></select>
     <button class="btn green" onclick="applyMod()">اعمال</button>
     <div class="log" id="l_mod"></div>
@@ -288,9 +288,8 @@ label{font-size:0.78rem;color:#aaa;display:block;margin-top:6px}
 var audioCtx = null;
 function initAudio() {
   if (!audioCtx) {
-    try {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    } catch(e) { log2('AudioContext not supported'); return null; }
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch(e) { log2('AudioContext not supported'); return null; }
   }
   if (audioCtx.state === 'suspended') audioCtx.resume();
   return audioCtx;
@@ -305,16 +304,11 @@ function playPulses(pulses, freqHz) {
   for (var i = 0; i < pulses.length; i++) totalUs += pulses[i];
   var totalSec = totalUs / 1000000;
   if (totalSec < 0.001) return 0;
-
   var samples = Math.ceil(totalSec * sr);
   var buffer = ctx.createBuffer(1, samples, sr);
   var data = buffer.getChannelData(0);
-
-  var offset = 0;
-  var state = true;
-  var phase = 0;
+  var offset = 0, state = true, phase = 0;
   var dphase = 2 * Math.PI * freqHz / sr;
-
   for (var i = 0; i < pulses.length; i++) {
     var dur = Math.round(pulses[i] * sr / 1000000);
     if (state) {
@@ -327,7 +321,6 @@ function playPulses(pulses, freqHz) {
     offset += dur;
     state = !state;
   }
-
   var source = ctx.createBufferSource();
   source.buffer = buffer;
   source.connect(ctx.destination);
@@ -356,12 +349,13 @@ function initWS(){
   try{
     ws=new WebSocket('ws://'+location.hostname+':81/');
     ws.onmessage=function(e){
-      var d=JSON.parse(e.data);
-      if(d.type==='log'){ log2(d.msg); }
-      else if(d.type==='spec'){ drawChart(d.data); }
+      try{ var d=JSON.parse(e.data);
+        if(d.type==='log'){ log2(d.msg); }
+        else if(d.type==='spec'){ drawChart(d.data); }
+      }catch(err){}
     };
     ws.onclose=function(){ setTimeout(initWS,3000); };
-  }catch(e){ console.log('WS error',e); }
+  }catch(e){}
 }
 
 function build(){var m=document.getElementById('menu'),h='';for(var i=0;i<items.length;i++){var it=items[i];var st=(it.id==='nrf')?status.nrf:(it.id==='si')?status.si:'EDU';var cls='badge '+((st==='OK')?'ok':(st==='N/A')?'na':'edu');var s=(i===cur&&!inSub)?' sel':'';h+='<div class="menu-item'+s+'" onclick="pick('+i+')"><span>'+it.label+'</span><span class="'+cls+'">'+st+'</span></div>';}m.innerHTML=h;}
@@ -376,7 +370,7 @@ function log2(msg){var a=document.querySelector('.view.on .log');if(a){a.innerHT
 function refresh(){fetch('/status').then(r=>r.json()).then(d=>{status=d;document.getElementById('led').className='led '+((d.nrf==='OK'||d.si==='OK')?'green':'red');document.getElementById('st').innerText='NRF24: '+d.nrf+' | SI4432: '+d.si;if(d.device_name)document.getElementById('dName').innerText=d.device_name;build();}).catch(()=>{});}
 
 function initChart(){var c=document.getElementById('specChart');if(!c)return;specCtx=c.getContext('2d');c.width=c.offsetWidth;c.height=c.offsetHeight;drawChart([]);}
-function drawChart(data){if(!specCtx)return;var c=specCtx.canvas;specCtx.fillStyle='#000';specCtx.fillRect(0,0,c.width,c.height);specCtx.strokeStyle='#1a3a4a';for(var i=1;i<10;i++){var y=(c.height/10)*i;specCtx.beginPath();specCtx.moveTo(0,y);specCtx.lineTo(c.width,y);specCtx.stroke();}if(data.length===0)return;var bw=c.width/data.length;for(var i=0;i<data.length;i++){var pct=(data[i]+120)/90;if(pct<0)pct=0;if(pct>1)pct=1;var h=pct*c.height;specCtx.fillStyle='rgb('+Math.floor(255*pct)+','+Math.floor(255*(1-pct))+',50)';specCtx.fillRect(i*bw,c.height-h,bw-1,h);}}
+function drawChart(data){if(!specCtx)return;var c=specCtx.canvas;specCtx.fillStyle='#000';specCtx.fillRect(0,0,c.width,c.height);specCtx.strokeStyle='#1a3a4a';for(var i=1;i<10;i++){var y=(c.height/10)*i;specCtx.beginPath();specCtx.moveTo(0,y);specCtx.lineTo(c.width,y);specCtx.stroke();}if(!data||data.length===0)return;var bw=c.width/data.length;for(var i=0;i<data.length;i++){var pct=(data[i]+120)/90;if(pct<0)pct=0;if(pct>1)pct=1;var h=pct*c.height;specCtx.fillStyle='rgb('+Math.floor(255*pct)+','+Math.floor(255*(1-pct))+',50)';specCtx.fillRect(i*bw,c.height-h,bw-1,h);}}
 function startSpec(){stopSpec();initChart();specTimer=setInterval(()=>{fetch('/si_spectrum_json').then(r=>r.json()).then(d=>drawChart(d.rssi)).catch(()=>{});},1500);}
 function stopSpec(){if(specTimer){clearInterval(specTimer);specTimer=null;}}
 
@@ -386,11 +380,7 @@ function stopRSSI(){if(rssiTimer){clearInterval(rssiTimer);rssiTimer=null;}}
 function applyMod(){var v=document.getElementById('modSel').value;fetch('/si_set_mod?mod='+v).then(r=>r.text()).then(t=>log2(t));}
 function applyDR(){var v=document.getElementById('drSel').value;fetch('/si_set_dr?dr='+v).then(r=>r.text()).then(t=>log2(t));}
 
-function startSigGen(){
-  var f=document.getElementById('genFreq').value;
-  var p=document.getElementById('genPattern').value;
-  fetch('/siggen_start?freq='+f+'&pattern='+p).then(r=>r.text()).then(t=>log2(t));
-}
+function startSigGen(){var f=document.getElementById('genFreq').value;var p=document.getElementById('genPattern').value;fetch('/siggen_start?freq='+f+'&pattern='+p).then(r=>r.text()).then(t=>log2(t));}
 function stopSigGen(){fetch('/siggen_stop').then(r=>r.text()).then(t=>log2(t));}
 
 function toggleListen(){if(listening){stopListen();}else{startListen();}}
@@ -406,15 +396,10 @@ function startListen(){
     listenLoop();
   });
 }
-function stopListen(){
-  listening = false;
-  if(listenTimer){ clearTimeout(listenTimer); listenTimer=null; }
-  var btn = document.getElementById('btnListen');
-  if(btn){ btn.innerText = '▶️ شروع شنیدن'; btn.className = 'btn green'; }
-}
+function stopListen(){listening=false;if(listenTimer){clearTimeout(listenTimer);listenTimer=null;}var btn=document.getElementById('btnListen');if(btn){btn.innerText='▶️ شروع شنیدن';btn.className='btn green';}}
 async function listenLoop(){
   while(listening){
-    try {
+    try{
       await fetch('/raw_capture');
       await sleep(2200);
       var r = await fetch('/raw_pulses');
@@ -423,13 +408,8 @@ async function listenLoop(){
         var dur = playPulses(d.pulses, 2500);
         log2('▶ Played ' + d.pulses.length + ' pulses (' + dur.toFixed(2) + 's)');
         await sleep(dur * 1000);
-      } else {
-        await sleep(300);
-      }
-    } catch(e) {
-      log2('Error: ' + e);
-      await sleep(500);
-    }
+      } else { await sleep(300); }
+    }catch(e){ log2('Error: ' + e); await sleep(500); }
   }
 }
 function singleListen(){
@@ -440,10 +420,8 @@ function singleListen(){
       log2('🎙️ Recording 2s...');
       setTimeout(()=>{
         fetch('/raw_pulses').then(r=>r.json()).then(d=>{
-          if(d.pulses && d.pulses.length > 0){
-            var dur = playPulses(d.pulses, 2500);
-            log2('▶ Played ' + d.pulses.length + ' pulses');
-          } else log2('No signal captured');
+          if(d.pulses && d.pulses.length > 0){ var dur = playPulses(d.pulses, 2500); log2('▶ Played ' + d.pulses.length + ' pulses'); }
+          else log2('No signal captured');
         });
       }, 2200);
     });
@@ -485,10 +463,7 @@ function rawCaptureOnly(){
 }
 function playLastCapture(){
   initAudio();
-  if(!lastPulses || lastPulses.length === 0){
-    log2('No previous capture. Press record first.');
-    return;
-  }
+  if(!lastPulses || lastPulses.length === 0){ log2('No previous capture. Press record first.'); return; }
   playPulses(lastPulses, 2000);
   log2('▶ Played last capture');
 }
@@ -599,9 +574,6 @@ bool detect_si4432() {
   int st = radio_si.begin(cfg_si_freq);
   if (st == RADIOLIB_ERR_NONE) {
     radio_si.setOutputPower(cfg_si_power);
-    if (cfg_si_modulation == "OOK") radio_si.setModulation(RADIOLIB_SI443X_MODULATION_OOK);
-    else if (cfg_si_modulation == "GFSK") radio_si.setModulation(RADIOLIB_SI443X_MODULATION_GFSK);
-    else radio_si.setModulation(RADIOLIB_SI443X_MODULATION_FSK);
     return true;
   }
   return false;
@@ -689,7 +661,7 @@ void processSigGen() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== HIZMOS v6.0 ===");
+  Serial.println("\n=== HIZMOS v6.1 ===");
 
   pinMode(SI4432_RX_DATA, INPUT);
   pinMode(SI4432_SDN, OUTPUT);
@@ -705,20 +677,16 @@ void setup() {
   WiFi.softAP(cfg_ap_ssid.c_str(), cfg_ap_password.c_str());
   Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
 
-  // MQTT
   mqttClient.setServer(cfg_mqtt_server.c_str(), cfg_mqtt_port);
   mqttClient.setCallback(mqttCallback);
 
-  // WebSocket
   webSocket.begin();
   webSocket.onEvent([](uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
     if (type == WStype_TEXT) {
-      String msg = String((char*)payload);
-      Serial.printf("WS[%u]: %s\n", num, msg.c_str());
+      Serial.printf("WS[%u]: %s\n", num, (char*)payload);
     }
   });
 
-  // BLE
   NimBLEDevice::init("HIZMOS-BLE");
 
   server.on("/", HTTP_GET, [](){ server.send_P(200, "text/html", HTML_PAGE); });
@@ -727,7 +695,6 @@ void setup() {
     server.send(200, "application/json", j);
   });
 
-  // ... (تمام endpointهای قبلی)
   server.on("/nrf_info", HTTP_GET, [](){
     if(!nrf_ok){ server.send(200,"text/plain","NRF24 N/A\n"); return; }
     String r = "=== NRF24 ===\nChannel: " + String(cfg_nrf_channel) + "\nAddress: " + cfg_nrf_address + "\nRate: " + String(cfg_nrf_data_rate) + " kbps\n";
@@ -762,12 +729,7 @@ void setup() {
   server.on("/si_set_mod", HTTP_GET, [](){
     if(server.hasArg("mod")){
       cfg_si_modulation = server.arg("mod");
-      if(si_ok) {
-        if (cfg_si_modulation == "OOK") radio_si.setModulation(RADIOLIB_SI443X_MODULATION_OOK);
-        else if (cfg_si_modulation == "GFSK") radio_si.setModulation(RADIOLIB_SI443X_MODULATION_GFSK);
-        else radio_si.setModulation(RADIOLIB_SI443X_MODULATION_FSK);
-      }
-      server.send(200,"text/plain","Mod: " + cfg_si_modulation + "\n");
+      server.send(200,"text/plain","Mod set to: " + cfg_si_modulation + " (Note: setModulation not supported on this RadioLib version - chip uses default)\n");
     } else server.send(400,"text/plain","Missing");
   });
   server.on("/si_set_dr", HTTP_GET, [](){
@@ -896,6 +858,7 @@ void setup() {
     for (int i = 0; i < n; i++) {
       r += String(i+1) + ". " + WiFi.SSID(i) + " (" + WiFi.RSSI(i) + " dBm) CH" + WiFi.channel(i) + "\n";
     }
+    WiFi.scanDelete();
     server.send(200,"text/plain", r);
   });
 
@@ -903,12 +866,16 @@ void setup() {
   server.on("/ble_scan", HTTP_GET, [](){
     NimBLEScan* pScan = NimBLEDevice::getScan();
     pScan->setActiveScan(true);
-    NimBLEScanResults results = pScan->start(3);
+    pScan->start(3, false);
+    NimBLEScanResults results = pScan->getResults();
     String r = "=== BLE Scan (" + String(results.getCount()) + " devices) ===\n";
     for (int i = 0; i < results.getCount(); i++) {
-      NimBLEAdvertisedDevice dev = results.getDevice(i);
-      r += dev.getAddress().toString().c_str() + String(" RSSI:") + String(dev.getRSSI()) + "\n";
+      const NimBLEAdvertisedDevice* dev = results.getDevice(i);
+      if (dev) {
+        r += String(dev->getAddress().toString().c_str()) + " RSSI:" + String(dev->getRSSI()) + "\n";
+      }
     }
+    pScan->clearResults();
     server.send(200,"text/plain", r);
   });
 
@@ -1012,9 +979,7 @@ void loop() {
   webSocket.loop();
   rawProcessCapture();
   processSigGen();
-  if (WiFi.status() == WL_CONNECTED || WiFi.softAPgetStationNum() > 0) {
-    mqttReconnect();
-    mqttClient.loop();
-  }
+  mqttReconnect();
+  mqttClient.loop();
   delay(1);
 }
