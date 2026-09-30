@@ -1,4 +1,4 @@
-name: Build HIZMOS v7.1
+name: Build HIZMOS v9.0
 
 on: [workflow_dispatch]
 
@@ -7,7 +7,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: arduino/setup-arduino-cli@v1
 
       - name: Install ESP32 core
@@ -20,15 +19,12 @@ jobs:
       - name: Install libraries
         run: |
           arduino-cli lib install "RadioLib@6.5.0"
-          arduino-cli lib install "ArduinoJson@6.21.3"
 
-      - name: Compile with min_spiffs
+      - name: Compile
         run: |
-          arduino-cli compile \
-            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" \
-            --build-path build MySketch
+          arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" --build-path build MySketch
 
-      - name: Upload bin
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: hizmos-firmware
