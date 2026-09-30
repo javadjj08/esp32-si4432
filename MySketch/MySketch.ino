@@ -1,8 +1,8 @@
 /*
  * ============================================================
- *  ESP32 + SI4432 SubGHz RAW Recorder / Replayer (بهینه‌شده)
+ *  ESP32 + SI4432 SubGHz RAW Recorder / Replayer (Fixed)
  *  حالت AP | پین D34 | سازگار با Flipper Zero .sub
- *  تشخیص خودکار + WebSocket UI + تنظیمات + OTA وب
+ *  RadioLib 6.5.0 + ArduinoJson 6.21.5
  * ============================================================
  */
 
@@ -19,16 +19,15 @@
 const char* AP_SSID     = "SI4432-AP";
 const char* AP_PASSWORD = "si4432admin";
 
-// ==================== مقادیر پیش‌فرض پین‌ها ====================
+// ==================== مقادیر پیش‌فرض ====================
 #define DEF_PIN_CS      5
 #define DEF_PIN_IRQ     2
 #define DEF_PIN_SDN     4
-#define DEF_PIN_GPIO2   34   // D34 (امن شده)
+#define DEF_PIN_GPIO2   34
 #define DEF_FREQ_MHZ    433.92
 #define DEF_BITRATE     4.8
 #define DEF_RX_BW       100.0
 #define DEF_TX_POWER    10
-#define DEF_RSSI_THR    0x20
 #define DEF_MIN_PULSE   50
 #define DEF_TIMEOUT_MS  8000
 
@@ -42,7 +41,6 @@ struct Config {
   float bitrate;
   float rxBW;
   int   txPower;
-  uint8_t rssiThr;
   uint16_t minPulse;
   uint32_t timeoutMs;
 } cfg;
@@ -60,17 +58,21 @@ uint16_t pulseTimings[MAX_PULSES];
 volatile uint16_t pulseCount = 0;
 volatile bool capturing = false;
 volatile bool autoMode = false;
-volatile bool signalDetected = false;
 volatile unsigned long lastEdgeUs = 0;
 volatile int lastLevel = LOW;
 unsigned long lastCaptureTime = 0;
 String lastSignalName = "";
 
-// ==================== حالت‌های سیستم ====================
+// ==================== متغیرهای تشخیص خودکار ====================
+unsigned long lastAutoCheck = 0;
+int lastAutoState = LOW;
+int autoEdgeCount = 0;
+
+// ==================== حالت‌ها ====================
 enum Mode { MODE_IDLE, MODE_RX, MODE_TX };
 Mode currentMode = MODE_IDLE;
 
-// ==================== توابع تنظیمات ====================
+// ==================== تنظیمات ====================
 
 void loadConfig() {
   prefs.begin("subghz", true);
@@ -82,7 +84,6 @@ void loadConfig() {
   cfg.bitrate   = prefs.getFloat("bitrate", DEF_BITRATE);
   cfg.rxBW      = prefs.getFloat("rxBW", DEF_RX_BW);
   cfg.txPower   = prefs.getInt("txPower", DEF_TX_POWER);
-  cfg.rssiThr   = prefs.getUChar("rssiThr", DEF_RSSI_THR);
   cfg.minPulse  = prefs.getUShort("minPulse", DEF_MIN_PULSE);
   cfg.timeoutMs = prefs.getULong("timeout", DEF_TIMEOUT_MS);
   prefs.end();
@@ -99,14 +100,13 @@ void saveConfig() {
   prefs.putFloat("bitrate", cfg.bitrate);
   prefs.putFloat("rxBW", cfg.rxBW);
   prefs.putInt("txPower", cfg.txPower);
-  prefs.putUChar("rssiThr", cfg.rssiThr);
   prefs.putUShort("minPulse", cfg.minPulse);
   prefs.putULong("timeout", cfg.timeoutMs);
   prefs.end();
   Serial.println("[CFG] ذخیره شد");
 }
 
-// ==================== توابع وقفه ====================
+// ==================== وقفه ضبط ====================
 
 void IRAM_ATTR gpio2PulseHandler() {
   if (!capturing) return;
@@ -123,11 +123,7 @@ void IRAM_ATTR gpio2PulseHandler() {
   }
 }
 
-void IRAM_ATTR onSignalDetected() {
-  signalDetected = true;
-}
-
-// ==================== ارتباط WebSocket ====================
+// ==================== WebSocket ====================
 
 void wsSendStatus(const char* mode, const char* statusText, uint16_t pulses) {
   StaticJsonDocument<256> doc;
@@ -151,7 +147,6 @@ void wsSendConfig() {
   doc["bitrate"] = cfg.bitrate;
   doc["rxBW"] = cfg.rxBW;
   doc["txPower"] = cfg.txPower;
-  doc["rssiThr"] = cfg.rssiThr;
   doc["minPulse"] = cfg.minPulse;
   doc["timeout"] = cfg.timeoutMs;
   String out;
@@ -169,29 +164,11 @@ bool initRadio() {
   if (radio) { delete radio; radio = nullptr; }
   radio = new Si4432(new Module(cfg.pinCS, cfg.pinIRQ, cfg.pinSDN));
 
-  int state = radio->begin(cfg.freqMHz, cfg.bitrate, 5.0, cfg.rxBW, cfg.txPower, 16);
+  int state = radio->begin(cfg.freqMHz, cfg.bitrate, 5.0, cfg.rxBW, cfg.txPower);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.printf("[RADIO] begin خطا: %d\n", state);
     return false;
   }
-
-  state = radio->setModulation(RADIOLIB_SI443X_MODULATION_OOK);
-  if (state != RADIOLIB_ERR_NONE) {
-    Serial.printf("[RADIO] setModulation خطا: %d\n", state);
-    return false;
-  }
-
-  // پیکربندی GPIO2 به عنوان خروجی داده خام
-  radio->SPIsetRegValue(RADIOLIB_SI443X_REG_GPIO2_CONFIG, 0x14, 4, 0);
-
-  // آستانه RSSI
-  radio->SPIsetRegValue(RADIOLIB_SI443X_REG_RSSI_THRESHOLD, cfg.rssiThr);
-
-  // فعال‌سازی وقفه RSSI
-  uint8_t intEnable2;
-  radio->SPIreadRegister(RADIOLIB_SI443X_REG_INT_ENABLE_2, &intEnable2);
-  intEnable2 |= 0x10;
-  radio->SPIwriteRegister(RADIOLIB_SI443X_REG_INT_ENABLE_2, intEnable2);
 
   Serial.println("[RADIO] SI4432 آماده شد");
   return true;
@@ -217,7 +194,7 @@ void enterTxMode() {
   currentMode = MODE_TX;
 }
 
-// ==================== ضبط و ذخیره ====================
+// ==================== ضبط ====================
 
 void startCapture() {
   if (capturing || !radio) return;
@@ -228,6 +205,7 @@ void startCapture() {
   lastEdgeUs = micros();
   lastLevel = digitalRead(cfg.pinGPIO2);
   lastCaptureTime = millis();
+  lastAutoState = lastLevel;
 
   attachInterrupt(digitalPinToInterrupt(cfg.pinGPIO2), gpio2PulseHandler, CHANGE);
   capturing = true;
@@ -262,7 +240,7 @@ String stopCapture() {
   return "OK";
 }
 
-// ==================== خواندن/نوشتن فایل .sub ====================
+// ==================== فایل .sub ====================
 
 bool saveSubFile(const char* path) {
   File f = SPIFFS.open(path, FILE_WRITE);
@@ -375,7 +353,7 @@ bool replaySubFile(const char* path) {
   return true;
 }
 
-// ==================== پردازش OTA وب ====================
+// ==================== OTA ====================
 
 void handleOTAUpload(AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
   if (!index) {
@@ -398,7 +376,7 @@ void handleOTAUpload(AsyncWebServerRequest *request, String filename, size_t ind
   }
 }
 
-// ==================== رویدادهای WebSocket ====================
+// ==================== WebSocket Events ====================
 
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
                AwsEventType type, void *arg, uint8_t *data, size_t len) {
@@ -433,7 +411,6 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 
         if (strcmp(cmd, "start") == 0) {
           autoMode = false;
-          detachInterrupt(digitalPinToInterrupt(cfg.pinIRQ));
           startCapture();
         }
         else if (strcmp(cmd, "stop") == 0) {
@@ -458,10 +435,10 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
           autoMode = !autoMode;
           if (autoMode) {
             enterRxMode();
-            attachInterrupt(digitalPinToInterrupt(cfg.pinIRQ), onSignalDetected, FALLING);
+            autoEdgeCount = 0;
+            lastAutoState = digitalRead(cfg.pinGPIO2);
             wsSendStatus("auto", "حالت شنود خودکار فعال", 0);
           } else {
-            detachInterrupt(digitalPinToInterrupt(cfg.pinIRQ));
             wsSendStatus("idle", "حالت شنود خودکار غیرفعال", 0);
           }
         }
@@ -484,7 +461,6 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
           if (doc.containsKey("bitrate")) cfg.bitrate = doc["bitrate"];
           if (doc.containsKey("rxBW")) cfg.rxBW = doc["rxBW"];
           if (doc.containsKey("txPower")) cfg.txPower = doc["txPower"];
-          if (doc.containsKey("rssiThr")) cfg.rssiThr = doc["rssiThr"];
           if (doc.containsKey("minPulse")) cfg.minPulse = doc["minPulse"];
           if (doc.containsKey("timeout")) cfg.timeoutMs = doc["timeout"];
           saveConfig();
@@ -504,7 +480,7 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
   }
 }
 
-// ==================== رابط HTML ====================
+// ==================== HTML ====================
 
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -586,10 +562,9 @@ const char index_html[] PROGMEM = R"rawliteral(
       <div class="field"><label>توان ارسال (dBm)</label><input type="number" id="txPower" value="10"></div>
     </div>
     <div class="row">
-      <div class="field"><label>آستانه RSSI (0-255)</label><input type="number" id="rssiThr" value="32"></div>
       <div class="field"><label>حداقل پالس (µs)</label><input type="number" id="minPulse" value="50"></div>
+      <div class="field"><label>تایم‌اوت ضبط (ms)</label><input type="number" id="timeout" value="8000"></div>
     </div>
-    <div class="field"><label>تایم‌اوت ضبط (ms)</label><input type="number" id="timeout" value="8000"></div>
     <button class="btn btn-settings" onclick="saveConfig()">💾 ذخیره تنظیمات</button>
     <button class="btn btn-info" onclick="sendCmd('restart')">🔄 ری‌استارت دستگاه</button>
   </div>
@@ -624,7 +599,6 @@ const char index_html[] PROGMEM = R"rawliteral(
         document.getElementById('bitrate').value = obj.bitrate;
         document.getElementById('rxBW').value = obj.rxBW;
         document.getElementById('txPower').value = obj.txPower;
-        document.getElementById('rssiThr').value = obj.rssiThr;
         document.getElementById('minPulse').value = obj.minPulse;
         document.getElementById('timeout').value = obj.timeout;
       }
@@ -655,7 +629,6 @@ const char index_html[] PROGMEM = R"rawliteral(
       bitrate: parseFloat(document.getElementById('bitrate').value),
       rxBW: parseFloat(document.getElementById('rxBW').value),
       txPower: parseInt(document.getElementById('txPower').value),
-      rssiThr: parseInt(document.getElementById('rssiThr').value),
       minPulse: parseInt(document.getElementById('minPulse').value),
       timeout: parseInt(document.getElementById('timeout').value)
     };
@@ -673,16 +646,16 @@ const char index_html[] PROGMEM = R"rawliteral(
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println(F("\n--- ESP32 + SI4432 SubGHz (حالت AP) ---"));
+  Serial.println(F("\n--- ESP32 + SI4432 SubGHz (AP Mode) ---"));
 
   loadConfig();
 
   if (!SPIFFS.begin(true)) {
-    Serial.println(F("SPIFFS مقداردهی نشد!"));
+    Serial.println(F("SPIFFS init failed!"));
     return;
   }
 
-  // ---- حالت AP ----
+  // ---- AP Mode ----
   WiFi.persistent(false);
   WiFi.setSleep(false);
   WiFi.mode(WIFI_AP);
@@ -693,14 +666,14 @@ void setup() {
   Serial.print(F("IP:   ")); Serial.println(WiFi.softAPIP());
   Serial.println(F("============================="));
 
-  // ---- راه‌اندازی رادیو ----
+  // ---- Radio Init ----
   if (!initRadio()) {
-    Serial.println(F("رادیو مقداردهی نشد!"));
+    Serial.println(F("Radio init failed!"));
   } else {
     enterRxMode();
   }
 
-  // ---- وب سرور ----
+  // ---- Web Server ----
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
 
@@ -720,7 +693,7 @@ void setup() {
   );
 
   server.begin();
-  Serial.println(F("وب سرور راه‌اندازی شد."));
+  Serial.println(F("Web server started."));
 }
 
 // ==================== loop ====================
@@ -728,21 +701,30 @@ void setup() {
 void loop() {
   ws.cleanupClients();
 
-  if (!capturing && signalDetected && currentMode == MODE_RX && autoMode && radio) {
-    signalDetected = false;
-    Serial.println("[AUTO] سیگنال شناسایی شد! شروع ضبط...");
-    wsLog("سیگنال شناسایی شد! شروع ضبط...");
-
-    uint8_t dummy;
-    radio->SPIreadRegister(RADIOLIB_SI443X_REG_INT_STATUS_1, &dummy);
-    radio->SPIreadRegister(RADIOLIB_SI443X_REG_INT_STATUS_2, &dummy);
-
-    startCapture();
+  // تشخیص خودکار سیگنال با پولینگ
+  if (autoMode && !capturing && currentMode == MODE_RX) {
+    if (millis() - lastAutoCheck > 5) {
+      lastAutoCheck = millis();
+      int s = digitalRead(cfg.pinGPIO2);
+      if (s != lastAutoState) {
+        autoEdgeCount++;
+        lastAutoState = s;
+        if (autoEdgeCount > 20) {
+          autoEdgeCount = 0;
+          Serial.println("[AUTO] سیگنال شناسایی شد! شروع ضبط...");
+          wsLog("سیگنال شناسایی شد! شروع ضبط...");
+          startCapture();
+        }
+      }
+      if (millis() - lastEdgeUs > 500000) autoEdgeCount = 0;
+    }
   }
 
+  // توقف خودکار
   if (capturing && (millis() - lastCaptureTime > cfg.timeoutMs)) {
     Serial.println("[AUTO] تایم‌اوت ضبط. توقف...");
     stopCapture();
+    autoEdgeCount = 0;
   }
 
   delay(5);
