@@ -1,0 +1,39 @@
+name: Build ESP32 DevKit
+
+on: [workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v1
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+
+      - name: Compile for ESP32 DevKit
+        run: |
+          arduino-cli compile --fqbn esp32:esp32:esp32 --build-path build MySketch
+
+      - name: Merge bin files into one
+        run: |
+          pip install esptool
+          BOOT_APP0=$(find ~/.arduino15 -name "boot_app0.bin" | head -n 1)
+          esptool --chip esp32 merge_bin -o merged-firmware.bin \
+            --flash_mode dio --flash_freq 40m --flash_size 4MB \
+            0x1000 build/MySketch.ino.bootloader.bin \
+            0x8000 build/MySketch.ino.partitions.bin \
+            0xe000 "$BOOT_APP0" \
+            0x10000 build/MySketch.ino.bin
+
+      - name: Upload merged firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware
+          path: merged-firmware.bin
