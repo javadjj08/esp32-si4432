@@ -1,4 +1,4 @@
-name: Build ESP32 DevKit
+name: Build Diagnostic
 
 on: [workflow_dispatch]
 
@@ -19,34 +19,16 @@ jobs:
 
       - name: Install libraries
         run: |
-          arduino-cli lib install "RF24@1.4.9"
           arduino-cli lib install "RadioLib@6.5.0"
-          arduino-cli lib install "ArduinoJson@6.21.3"
-          arduino-cli lib install "NimBLE-Arduino"
-          arduino-cli lib install "PubSubClient"
-          arduino-cli lib install "WebSockets"
 
-      - name: Compile with OTA partition (min_spiffs)
+      - name: Compile with min_spiffs
         run: |
           arduino-cli compile \
             --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" \
             --build-path build MySketch
 
-      - name: Merge bin files into one
-        run: |
-          pip install esptool
-          BOOT_APP0=$(find ~/.arduino15 -name "boot_app0.bin" | head -n 1)
-          esptool --chip esp32 merge_bin -o merged-firmware.bin \
-            --flash_mode dio --flash_freq 40m --flash_size 4MB \
-            0x1000 build/MySketch.ino.bootloader.bin \
-            0x8000 build/MySketch.ino.partitions.bin \
-            0xe000 "$BOOT_APP0" \
-            0x10000 build/MySketch.ino.bin
-
-      - name: Upload all firmware files
+      - name: Upload bin
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-firmware
-          path: |
-            merged-firmware.bin
-            build/MySketch.ino.bin
+          name: diag-firmware
+          path: build/MySketch.ino.bin
