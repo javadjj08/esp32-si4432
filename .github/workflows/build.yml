@@ -1,4 +1,4 @@
-name: Build SI4432 SubGHz
+name: Build SI4432 Controller
 
 on: [workflow_dispatch]
 
@@ -11,7 +11,7 @@ jobs:
       - name: Install arduino-cli
         run: curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=/usr/local/bin sh
 
-      - name: Update core index
+      - name: Setup arduino-cli
         run: |
           arduino-cli config init
           arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
@@ -20,12 +20,15 @@ jobs:
       - name: Install ESP32 core
         run: arduino-cli core install esp32:esp32@2.0.17
 
-      - name: Install libraries from registry
-        run: |
-          arduino-cli lib install "RadioLib@6.5.0"
-          arduino-cli lib install "ArduinoJson@6.21.5"
+      - name: Install RadioLib
+        run: arduino-cli lib install "RadioLib@6.5.0"
 
-      - name: Install ESP32Async libraries from GitHub
+      - name: Install other libraries
+        run: |
+          arduino-cli lib install "ArduinoJson@6.21.5"
+          arduino-cli lib install "ElegantOTA@3.1.6"
+
+      - name: Install ESP32Async libraries
         run: |
           ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true arduino-cli lib install --git-url https://github.com/ESP32Async/AsyncTCP.git
           ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true arduino-cli lib install --git-url https://github.com/ESP32Async/ESPAsyncWebServer.git
@@ -34,9 +37,11 @@ jobs:
         run: |
           arduino-cli compile \
             --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" \
-            --build-path build MySketch
+            --build-path build \
+            --build-property "compiler.cpp.extra_flags=-DELEGANTOTA_USE_ASYNC_WEBSERVER=1" \
+            MySketch
 
-      - name: Merge bin files
+      - name: Merge bin
         run: |
           pip install esptool
           BOOT_APP0=$(find ~/.arduino15 -name "boot_app0.bin" | head -n 1)
@@ -47,7 +52,7 @@ jobs:
             0xe000 "$BOOT_APP0" \
             0x10000 build/MySketch.ino.bin
 
-      - name: Upload artifacts
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: si4432-firmware
