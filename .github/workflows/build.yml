@@ -10,24 +10,26 @@ jobs:
 
       - uses: arduino/setup-arduino-cli@v1
 
-      - name: Install ESP32 core (compatible version)
+      - name: Install ESP32 core
         run: |
           arduino-cli config init
           arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@2.0.17
 
-      - name: Install libraries (compatible versions)
+      - name: Install libraries
         run: |
           arduino-cli lib install "RF24@1.4.9"
-          arduino-cli lib install "RadioLib@6.4.0"
-          arduino-cli lib install "ArduinoJson"
+          arduino-cli lib install "RadioLib@6.5.0"
+          arduino-cli lib install "ArduinoJson@6.21.3"
+          arduino-cli lib install "NimBLE-Arduino"
+          arduino-cli lib install "PubSubClient"
+          arduino-cli lib install "WebSockets"
 
       - name: Compile for ESP32 DevKit
         run: |
           arduino-cli compile \
             --fqbn esp32:esp32:esp32 \
-            --build-property "build.extra_flags=-DRADIOLIB_GODMODE" \
             --build-path build MySketch
 
       - name: Merge bin files into one
