@@ -17,10 +17,10 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@2.0.17
 
-      - name: Install libraries
+      - name: Install libraries (compatible versions)
         run: |
           arduino-cli lib install "RF24"
-          arduino-cli lib install "RadioLib"
+          arduino-cli lib install "RadioLib@6.6.0"
           arduino-cli lib install "ArduinoJson"
 
       - name: Compile for ESP32 DevKit
