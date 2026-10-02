@@ -1,7 +1,7 @@
 /*
  * Si4432 BPS1EZ Universal RF Remote Replay Tool
  * ESP32 DevKit V1 + Si4432
- * Library: jnsbyr/Arduino-SI4432 (OOK + SPI Transactions)
+ * Library: jnsbyr/Arduino-SI4432 (v1.1.2)
  * Features: Manual Freq, Scan, Record, Replay, Settings, OOK/FSK, OTA
  */
 
@@ -10,7 +10,7 @@
 #include <SPI.h>
 #include <LittleFS.h>
 #include <Preferences.h>
-#include <si4432.h> // <-- نام هدر صحیح (حروف کوچک)
+#include <si4432.h>
 #include <ESPAsyncWebServer.h>
 #include <ElegantOTA.h>
 
@@ -38,7 +38,7 @@ float scanStep  = 0.1;
 bool  cfgOOKMode = true;
 
 // ==================== Si4432 ====================
-Si4432 radio(PIN_CS, PIN_SDN, PIN_IRQ, PIN_GPIO); // <-- نام کلاس صحیح
+Si4432 radio(PIN_CS, PIN_SDN, PIN_IRQ, PIN_GPIO);
 
 // ==================== State ====================
 bool scanning = false;
@@ -299,7 +299,7 @@ void reinitRadio() {
   radio.init();
   radio.setFrequency(cfgFreq);
   radio.setBaudRate(cfgBitrate);
-  radio.setModulationType(cfgOOKMode ? Si4432::OOK : Si4432::GFSK); // <-- enum صحیح
+  radio.setModulationType(cfgOOKMode ? Si4432::OOK : Si4432::GFSK);
   radio.setTxPower(cfgPower);
   radio.setPacketHandling(false);
   radio.setManchesterEncoding(false);
@@ -372,11 +372,13 @@ void doRecord() {
   }
   if (recordLen > 0 && (millis() - lastRecvTime > RECORD_TIMEOUT_MS)) finishRecording();
 }
+
+// ==================== Replay (اصلاح‌شده) ====================
 void replaySignal(float freq, uint8_t* data, uint16_t len) {
   radio.setFrequency(freq);
   radio.turnOn();
   delay(10);
-  radio.sendPacket(data, len);
+  radio.sendPacket((uint8_t)len, data);  // ✅ ترتیب صحیح: اول طول، بعد داده
   notifyStatus("پخش شد: " + String(freq, 2) + " MHz");
   radio.turnOn();
 }
