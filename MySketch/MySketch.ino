@@ -1,8 +1,8 @@
 /*
- * Si4432 BPS1EZ (Rev B1) Universal RF Tool
+ * Si4432 BPS1EZ (Rev B1) Universal RF Tool - FINAL STANDARD VERSION
  * ESP32 DevKit V1 + Si4432
  * Libs: RadioLib 6.5.0, ESPAsyncWebServer, ElegantOTA
- * Features: Manual Freq, Scan, Record, Replay, Settings, RAW OOK Mode, RSSI Diagnostic
+ * Features: Manual Freq, Scan, Record, Replay, Settings, RAW OOK Mode, Sync-Word RSSI
  */
 
 #include <Arduino.h>
@@ -14,7 +14,7 @@
 #include <ESPAsyncWebServer.h>
 #include <ElegantOTA.h>
 
-// ==================== Pins ====================
+// ==================== Pin Definitions ====================
 #define PIN_CS   5
 #define PIN_IRQ  16
 #define PIN_SDN  15
@@ -35,6 +35,7 @@ float cfgBitrate = 4.8;
 float cfgFreqDev = 5.0;
 int8_t cfgPower = 20;
 uint8_t cfgPreamble = 16;
+float cfgRxBw = 181.1;
 int cfgRssiThreshold = -75;
 float scanStart = 430.0;
 float scanEnd   = 440.0;
@@ -52,6 +53,10 @@ uint8_t  recordBuf[MAX_RECORD];
 uint16_t recordLen = 0;
 unsigned long lastRecvTime = 0;
 #define RECORD_TIMEOUT_MS 400
+
+// ==================== RSSI Interrupt ====================
+volatile bool rssiReady = false;
+volatile int lastRssi = -100;
 
 // ==================== Signal Index ====================
 #define MAX_SIGNALS 16
@@ -202,6 +207,7 @@ void finishRecording();
 void reinitRadio();
 void loadSettings();
 void saveSettingsToPrefs();
+void IRAM_ATTR onRadioInterrupt();
 
 // ==================== JSON Helpers ====================
 void notifyScan(float freq, int rssi) {
@@ -309,45 +315,46 @@ void hardResetSi4432() {
   Serial.println("[Si4432] Hard reset done");
 }
 
+// ==================== Interrupt Handler ====================
+void IRAM_ATTR onRadioInterrupt() {
+  rssiReady = true;
+}
+
 // ==================== Radio Init (B1 Optimized) ====================
 void reinitRadio() {
   hardResetSi4432();
   Serial.print("[Si4432] init... ");
 
-  int state = radio.begin(cfgFreq, cfgBitrate, cfgFreqDev, 181.1, cfgPower, cfgPreamble);
+  int state = radio.begin(cfgFreq, cfgBitrate, cfgFreqDev, cfgRxBw, cfgPower, cfgPreamble);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.printf("failed, code %d\n", state);
     notifyStatus("خطای Si4432: " + String(state));
     return;
   }
 
-  // فعال‌سازی حالت RAW برای دریافت OOK
   if (cfgRawMode) {
-    // در RadioLib 6.5.0، setModemConfig برای RAW وجود ندارد،
-    // اما می‌توان از طریق دسترسی به رجیسترها این کار را کرد.
-    // در حال حاضر با تنظیمات پیش‌فرض ادامه می‌دهیم.
-    Serial.println("(RAW mode requested)");
+    // حالت RAW برای دریافت OOK
+    radio.setSyncWord(0x00, 0x00);
+    radio.setAGC(false);
+    Serial.println("(RAW mode for OOK)");
   }
 
   radio.setFrequency(cfgFreq);
+  pinMode(PIN_IRQ, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_IRQ), onRadioInterrupt, FALLING);
   radio.startReceive();
-  Serial.println("OK (B1 optimized)");
+  Serial.println("OK (B1 standard)");
 }
 
-// ==================== RSSI Read (multi-sample) ====================
+// ==================== RSSI Read (Interrupt-based) ====================
 int readRSSIStable() {
-  int sum = 0;
-  int valid = 0;
-  for (int i = 0; i < 4; i++) {
-    delay(3);
-    float r = radio.getRSSI();
-    if (r > -130 && r < 0) {
-      sum += (int)r;
-      valid++;
-    }
+  if (rssiReady) {
+    rssiReady = false;
+    lastRssi = (int)radio.getRSSI();
+    return lastRssi;
   }
-  if (valid == 0) return -100;
-  return sum / valid;
+  // اگر وقفه رخ نداده باشد، مقدار ضعیف برگردان
+  return -100;
 }
 
 // ==================== Scan ====================
@@ -357,7 +364,7 @@ void doScan() {
 
   radio.setFrequency(currentFreq);
   radio.startReceive();
-  delay(15); // تأخیر لازم برای تثبیت PLL و AGC
+  delay(15);
 
   int rssi = readRSSIStable();
   notifyScan(currentFreq, rssi);
@@ -440,7 +447,7 @@ void onWsEvent(AsyncWebSocket* srv, AsyncWebSocketClient* client,
     saveSettingsToPrefs();
     reinitRadio();
     ws.textAll("{\"type\":\"RAW\",\"on\":" + String(cfgRawMode ? "true" : "false") + "}");
-    notifyStatus(cfgRawMode ? "RAW mode ON" : "RAW mode OFF");
+    notifyStatus(cfgRawMode ? "RAW mode ON (OOK)" : "RAW mode OFF (FSK)");
   }
   else if (cmd.startsWith("SET_FREQ:")) {
     cfgFreq = cmd.substring(9).toFloat();
