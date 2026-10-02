@@ -2,7 +2,7 @@
  * Si4432 BPS1EZ (Rev B1) Universal RF Tool - FINAL COMPLETE VERSION
  * ESP32 DevKit V1 + Si4432
  * Libs: RadioLib 6.5.0, ESPAsyncWebServer, ElegantOTA
- * Features: Manual Freq, Scan, Record, Replay, Settings, OOK Mode, AGC-aware RSSI
+ * Features: Manual Freq, Scan, Record, Replay, Settings, OOK/FSK Mode, AGC-aware RSSI
  */
 
 #include <Arduino.h>
@@ -319,7 +319,7 @@ void IRAM_ATTR onRadioInterrupt() {
   rssiReady = true;
 }
 
-// ==================== Radio Init (B1 Optimized for OOK) ====================
+// ==================== Radio Init (B1 Optimized for OOK/FSK) ====================
 void reinitRadio() {
   hardResetSi4432();
   Serial.print("[Si4432] init... ");
@@ -331,30 +331,30 @@ void reinitRadio() {
     return;
   }
 
-  // فعال‌سازی OOK برای ریموت‌های Sub-GHz
+  // --- تنظیم مدولاسیون با نوشتن مستقیم در رجیستر ---
   if (cfgOOKMode) {
-    radio.setOOK(true);
+    radio.SPIsetRegValue(RADIOLIB_SI443X_REG_MODULATION_MODE_CONTROL_2, RADIOLIB_SI443X_MODULATION_OOK, 1, 0);
     Serial.println("(OOK mode enabled)");
+  } else {
+    radio.SPIsetRegValue(RADIOLIB_SI443X_REG_MODULATION_MODE_CONTROL_2, RADIOLIB_SI443X_MODULATION_GFSK, 1, 0);
+    Serial.println("(GFSK mode enabled)");
   }
 
   radio.setFrequency(cfgFreq);
   pinMode(PIN_IRQ, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(PIN_IRQ), onRadioInterrupt, FALLING);
   radio.startReceive();
-  Serial.println("OK (B1 OOK mode)");
+  Serial.println("OK (B1 mode set)");
 }
 
 // ==================== RSSI Read (AGC settle aware) ====================
 int readRSSIStable() {
-  // چند بار پشت سر هم بخوان و پایدارترین مقدار را برگردان
   int r1 = (int)radio.getRSSI();
   delay(5);
   int r2 = (int)radio.getRSSI();
   delay(5);
   int r3 = (int)radio.getRSSI();
-  // میانگین
   int avg = (r1 + r2 + r3) / 3;
-  // اگر مقدار غیرمعتبر بود، ضعیف برگردان
   if (avg > 0) avg = -100;
   return avg;
 }
@@ -366,9 +366,7 @@ void doScan() {
 
   radio.setFrequency(currentFreq);
   radio.startReceive();
-
-  // مهم: AGC به زمان نیاز دارد تا settle کند
-  delay(50);
+  delay(50); // AGC settle time
 
   int rssi = readRSSIStable();
   notifyScan(currentFreq, rssi);
@@ -458,7 +456,7 @@ void onWsEvent(AsyncWebSocket* srv, AsyncWebSocketClient* client,
     saveSettingsToPrefs();
     reinitRadio();
     ws.textAll("{\"type\":\"OOK\",\"on\":" + String(cfgOOKMode ? "true" : "false") + "}");
-    notifyStatus(cfgOOKMode ? "OOK mode ON" : "FSK mode ON");
+    notifyStatus(cfgOOKMode ? "OOK mode ON" : "GFSK mode ON");
   }
   else if (cmd.startsWith("SET_FREQ:")) {
     cfgFreq = cmd.substring(9).toFloat();
