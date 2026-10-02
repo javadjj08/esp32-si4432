@@ -1,8 +1,8 @@
 /*
- * Si4432 BPS1EZ (Rev B1) Universal RF Tool - FINAL COMPLETE VERSION
+ * Si4432 BPS1EZ (Rev B1) Universal RF Remote Replay Tool
  * ESP32 DevKit V1 + Si4432
- * Libs: RadioLib 6.5.0, ESPAsyncWebServer, ElegantOTA
- * Features: Manual Freq, Scan, Record, Replay, Settings, OOK/FSK Mode, AGC-aware RSSI
+ * Library: nopnop2002/Arduino-SI4432 (OOK + SPI Transactions)
+ * Features: Manual Freq, Scan, Record, Replay, Settings, OOK/FSK, OTA
  */
 
 #include <Arduino.h>
@@ -10,17 +10,15 @@
 #include <SPI.h>
 #include <LittleFS.h>
 #include <Preferences.h>
-#include <RadioLib.h>
+#include <Si4432.h>
 #include <ESPAsyncWebServer.h>
 #include <ElegantOTA.h>
 
 // ==================== Pin Definitions ====================
 #define PIN_CS   5
-#define PIN_IRQ  16
 #define PIN_SDN  15
+#define PIN_IRQ  16
 #define PIN_GPIO 4
-
-Si4432 radio = new Module(PIN_CS, PIN_IRQ, PIN_SDN, PIN_GPIO);
 
 // ==================== WiFi ====================
 const char* STA_SSID = "YOUR_WIFI_SSID";
@@ -35,12 +33,14 @@ float cfgBitrate = 4.8;
 float cfgFreqDev = 5.0;
 int8_t cfgPower = 20;
 uint8_t cfgPreamble = 16;
-float cfgRxBw = 181.1;
 int cfgRssiThreshold = -75;
 float scanStart = 430.0;
 float scanEnd   = 440.0;
 float scanStep  = 0.1;
-bool  cfgOOKMode = true;   // OOK برای ریموت‌های Sub-GHz
+bool  cfgOOKMode = true;
+
+// ==================== Si4432 ====================
+Si4432 radio(PIN_CS, PIN_SDN, PIN_IRQ, PIN_GPIO);
 
 // ==================== State ====================
 bool scanning = false;
@@ -53,9 +53,6 @@ uint8_t  recordBuf[MAX_RECORD];
 uint16_t recordLen = 0;
 unsigned long lastRecvTime = 0;
 #define RECORD_TIMEOUT_MS 400
-
-// ==================== RSSI Interrupt ====================
-volatile bool rssiReady = false;
 
 // ==================== Signal Index ====================
 #define MAX_SIGNALS 16
@@ -206,7 +203,6 @@ void finishRecording();
 void reinitRadio();
 void loadSettings();
 void saveSettingsToPrefs();
-void IRAM_ATTR onRadioInterrupt();
 
 // ==================== JSON Helpers ====================
 void notifyScan(float freq, int rssi) {
@@ -304,59 +300,24 @@ bool loadSignal(uint16_t id, float* freq, uint8_t* buf, uint16_t* len) {
   return false;
 }
 
-// ==================== Hardware Reset ====================
-void hardResetSi4432() {
-  pinMode(PIN_SDN, OUTPUT);
-  digitalWrite(PIN_SDN, HIGH);
-  delay(200);
-  digitalWrite(PIN_SDN, LOW);
-  delay(200);
-  Serial.println("[Si4432] Hard reset done");
-}
-
-// ==================== Interrupt Handler ====================
-void IRAM_ATTR onRadioInterrupt() {
-  rssiReady = true;
-}
-
-// ==================== Radio Init (B1 Optimized for OOK/FSK) ====================
+// ==================== Radio Init ====================
 void reinitRadio() {
-  hardResetSi4432();
   Serial.print("[Si4432] init... ");
-
-  int state = radio.begin(cfgFreq, cfgBitrate, cfgFreqDev, cfgRxBw, cfgPower, cfgPreamble);
-  if (state != RADIOLIB_ERR_NONE) {
-    Serial.printf("failed, code %d\n", state);
-    notifyStatus("خطای Si4432: " + String(state));
+  if (!radio.init()) {
+    Serial.println("FAILED");
+    notifyStatus("خطای راه‌اندازی Si4432");
     return;
   }
 
-  // --- تنظیم مدولاسیون با نوشتن مستقیم در رجیستر (اصلاح‌شده) ---
-  if (cfgOOKMode) {
-    radio.mod->SPIsetRegValue(RADIOLIB_SI443X_REG_MODULATION_MODE_CONTROL_2, RADIOLIB_SI443X_MODULATION_OOK, 1, 0);
-    Serial.println("(OOK mode enabled)");
-  } else {
-    radio.mod->SPIsetRegValue(RADIOLIB_SI443X_REG_MODULATION_MODE_CONTROL_2, RADIOLIB_SI443X_MODULATION_GFSK, 1, 0);
-    Serial.println("(GFSK mode enabled)");
-  }
-
   radio.setFrequency(cfgFreq);
-  pinMode(PIN_IRQ, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PIN_IRQ), onRadioInterrupt, FALLING);
-  radio.startReceive();
-  Serial.println("OK (B1 mode set)");
-}
+  radio.setBaudRate(cfgBitrate);
+  radio.setModulationType(cfgOOKMode ? OOK : GFSK);
+  radio.setTxPower(cfgPower);
+  radio.setPacketHandling(false);
+  radio.setManchesterEncoding(false);
+  radio.turnOn();
 
-// ==================== RSSI Read (AGC settle aware) ====================
-int readRSSIStable() {
-  int r1 = (int)radio.getRSSI();
-  delay(5);
-  int r2 = (int)radio.getRSSI();
-  delay(5);
-  int r3 = (int)radio.getRSSI();
-  int avg = (r1 + r2 + r3) / 3;
-  if (avg > 0) avg = -100;
-  return avg;
+  Serial.println("OK (OOK=" + String(cfgOOKMode) + ")");
 }
 
 // ==================== Scan ====================
@@ -365,10 +326,10 @@ void doScan() {
   if (currentFreq > scanEnd) currentFreq = scanStart;
 
   radio.setFrequency(currentFreq);
-  radio.startReceive();
-  delay(50); // AGC settle time
+  radio.turnOn();
+  delay(50);
 
-  int rssi = readRSSIStable();
+  int rssi = (int)radio.getRSSI();
   notifyScan(currentFreq, rssi);
 
   currentFreq += scanStep;
@@ -379,10 +340,10 @@ void doDiagnostic() {
   if (!diagnosticMode) return;
 
   radio.setFrequency(currentFreq);
-  radio.startReceive();
+  radio.turnOn();
   delay(50);
 
-  int rssi = readRSSIStable();
+  int rssi = (int)radio.getRSSI();
   int raw = (int)((rssi + 131) / 0.5);
   notifyDiag(currentFreq, raw, rssi);
 
@@ -401,7 +362,8 @@ void doDiagnostic() {
 void startRecording() {
   scanning = false; recording = true; recordLen = 0;
   recordFreq = currentFreq; lastRecvTime = millis();
-  radio.setFrequency(recordFreq); radio.startReceive();
+  radio.setFrequency(recordFreq);
+  radio.turnOn();
   notifyStatus("Recording @ " + String(recordFreq, 2) + " MHz");
 }
 void finishRecording() {
@@ -415,22 +377,21 @@ void finishRecording() {
 }
 void doRecord() {
   if (!recording) return;
-  if (radio.available()) {
-    uint8_t buf[64];
-    size_t len = radio.readData(buf, sizeof(buf));
-    if (len > 0 && (recordLen + len) <= MAX_RECORD) {
-      memcpy(recordBuf + recordLen, buf, len);
-      recordLen += len; lastRecvTime = millis();
-    }
+  uint8_t buf[64];
+  uint8_t len = radio.receive(buf, sizeof(buf));
+  if (len > 0 && (recordLen + len) <= MAX_RECORD) {
+    memcpy(recordBuf + recordLen, buf, len);
+    recordLen += len; lastRecvTime = millis();
   }
   if (recordLen > 0 && (millis() - lastRecvTime > RECORD_TIMEOUT_MS)) finishRecording();
 }
 void replaySignal(float freq, uint8_t* data, uint16_t len) {
-  radio.setFrequency(freq); delay(10);
-  int state = radio.transmit(data, len);
-  if (state == RADIOLIB_ERR_NONE) notifyStatus("پخش شد: " + String(freq, 2) + " MHz");
-  else notifyStatus("خطای پخش: " + String(state));
-  delay(20); radio.startReceive();
+  radio.setFrequency(freq);
+  radio.turnOn();
+  delay(10);
+  radio.sendPacket(data, len);
+  notifyStatus("پخش شد: " + String(freq, 2) + " MHz");
+  radio.turnOn();
 }
 
 // ==================== WebSocket ====================
