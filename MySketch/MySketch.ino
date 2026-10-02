@@ -1,7 +1,7 @@
 /*
  * Si4432 BPS1EZ Universal RF Remote Replay Tool
  * ESP32 DevKit V1 + Si4432
- * Library: jnsbyr/Arduino-SI4432
+ * Library: jnsbyr/Arduino-SI4432 (v1.1.2)
  * Features: Manual Freq, Scan, Record, Replay, Settings, OOK/FSK, OTA
  */
 
@@ -10,7 +10,7 @@
 #include <SPI.h>
 #include <LittleFS.h>
 #include <Preferences.h>
-#include <si4432.h> // <-- نام هدر صحیح بر اساس کتابخانه jnsbyr
+#include <Si443x.h> // <-- نام هدر صحیح بر اساس کتابخانه jnsbyr
 #include <ESPAsyncWebServer.h>
 #include <ElegantOTA.h>
 
