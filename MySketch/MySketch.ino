@@ -79,7 +79,6 @@ const char HTML[] PROGMEM = R"HTML(
 body{font-family:Tahoma,sans-serif;background:#0a0e17;color:#e0e6ed;
      max-width:520px;margin:auto;min-height:100vh;display:flex;flex-direction:column}
 
-/* === Status Bar === */
 #statusbar{background:#0d1420;padding:8px 12px;display:flex;justify-content:space-between;
   align-items:center;border-bottom:1px solid #1e2a45;font-family:monospace;font-size:.8em;
   min-height:40px;position:sticky;top:0;z-index:10}
@@ -87,18 +86,15 @@ body{font-family:Tahoma,sans-serif;background:#0a0e17;color:#e0e6ed;
 #sbRssi{color:#f9a825}
 #sbState{color:#8899aa}
 
-/* === Screen Container === */
 .screen{display:none;padding:12px;flex:1;overflow-y:auto}
 .screen.active{display:block}
 
-/* === Header with Back === */
 .header{display:flex;align-items:center;gap:10px;margin-bottom:12px;
   padding-bottom:8px;border-bottom:1px solid #1e2a45}
 .back{background:transparent;color:#00e5ff;border:none;font-size:1.4em;
   cursor:pointer;padding:4px 12px;flex:0 0 auto}
 .title{font-size:1.05em;font-weight:bold;color:#e0e6ed}
 
-/* === Menu Grid (Flipper style) === */
 .menu{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:8px 0}
 .menu-item{background:#151c2c;border:1px solid #1e2a45;border-radius:12px;
   padding:22px 10px;display:flex;flex-direction:column;align-items:center;
@@ -109,7 +105,6 @@ body{font-family:Tahoma,sans-serif;background:#0a0e17;color:#e0e6ed;
 .menu-label{font-size:.85em;color:#e0e6ed;text-align:center;font-weight:600}
 .menu-sub{font-size:.7em;color:#7a8ba8;text-align:center;margin-top:2px}
 
-/* === Cards === */
 .card{background:#151c2c;border-radius:10px;padding:12px;margin-bottom:10px;
   border:1px solid #1e2a45}
 .row{display:flex;gap:6px;margin-bottom:8px;align-items:center}
@@ -119,7 +114,6 @@ input[type=number],input[type=text]{flex:1;background:#0a0e17;color:#0f0;
   font-size:.9em;color-scheme:dark}
 input:focus{outline:none;border-color:#00e5ff}
 
-/* === Buttons === */
 .btn{padding:12px;border:none;border-radius:8px;font-size:.9em;font-weight:600;
   cursor:pointer;touch-action:manipulation;font-family:inherit}
 .btn:active{transform:scale(.97)}
@@ -134,7 +128,6 @@ input:focus{outline:none;border-color:#00e5ff}
 .btn-preset.active{background:#00e5ff;color:#0a0e17}
 .btn-row{display:flex;gap:6px;margin-top:6px}
 
-/* === Big display === */
 .display{background:#0a0e17;border-radius:10px;padding:20px;text-align:center;
   margin-bottom:10px;border:1px solid #1e2a45}
 .display .value{font-size:2.4em;font-weight:700;color:#00e5ff;
@@ -144,7 +137,6 @@ input:focus{outline:none;border-color:#00e5ff}
 .rssi-fill{height:100%;width:0;background:#00e5ff;transition:width .15s}
 .hint{text-align:center;color:#8899aa;font-size:.8em;margin-top:8px;font-family:monospace}
 
-/* === Signal List === */
 .sig{background:#0a0e17;padding:12px;border-radius:8px;margin-bottom:8px;
   border:1px solid #1e2a45}
 .sig-head{display:flex;justify-content:space-between;align-items:flex-start}
@@ -153,7 +145,6 @@ input:focus{outline:none;border-color:#00e5ff}
 .sig-actions{display:flex;gap:4px;flex:0 0 auto}
 .empty{color:#3a4a66;text-align:center;padding:30px 10px;font-size:.85em}
 
-/* === Slider === */
 .slider-row{display:flex;gap:10px;align-items:center}
 input[type=range]{flex:1;height:8px;-webkit-appearance:none;background:#1e2a45;
   border-radius:4px;outline:none}
@@ -162,7 +153,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
 .th-val{min-width:55px;text-align:center;color:#00e5ff;font-family:monospace;
   font-weight:bold;font-size:1em}
 
-/* === Recording overlay === */
 .rec-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(10,14,23,.95);
   display:none;flex-direction:column;align-items:center;justify-content:center;
   padding:20px;z-index:100}
@@ -176,14 +166,12 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   border:none;border-radius:8px;font-size:1em;font-family:inherit}
 </style></head><body>
 
-<!-- === Status Bar === -->
 <div id="statusbar">
   <span id="sbFreq">433.92 MHz</span>
   <span id="sbRssi">-- dBm</span>
   <span id="sbState">● idle</span>
 </div>
 
-<!-- === HOME SCREEN === -->
 <div id="sc-home" class="screen active">
   <div class="header">
     <div class="title">📡 Si4432 Pro</div>
@@ -212,7 +200,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- === READ SCREEN === -->
 <div id="sc-read" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
@@ -238,7 +225,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- === SAVED SCREEN === -->
 <div id="sc-saved" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
@@ -249,7 +235,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   <div id="savedList"><div class="empty">خالی — ابتدا از Read استفاده کن</div></div>
 </div>
 
-<!-- === ANALYZER SCREEN === -->
 <div id="sc-analyzer" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
@@ -282,7 +267,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- === SETTINGS SCREEN === -->
 <div id="sc-settings" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
@@ -306,7 +290,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
           onclick="resetSettings()">↺ بازگشت به پیش‌فرض</button>
 </div>
 
-<!-- === RECORDING OVERLAY === -->
 <div class="rec-overlay" id="recOverlay">
   <div class="rec-pulse"></div>
   <div class="rec-rssi" id="recLiveRssi">--- dBm</div>
@@ -346,6 +329,12 @@ function connect(){
         document.getElementById('recLiveRssi').textContent=m.rssi+' dBm';
         document.getElementById('recStatus').textContent=m.state;
         setSbRssi(m.rssi);
+        if(m.state==='done'){
+          setTimeout(()=>{document.getElementById('recOverlay').classList.remove('active');},800);
+        }
+        if(m.state==='timeout'){
+          setTimeout(()=>{document.getElementById('recOverlay').classList.remove('active');},1500);
+        }
       }
     }catch(x){}
   };
@@ -358,15 +347,14 @@ function go(screen){
   currentScreen=screen;
   if(screen==='saved') send('LIST');
   if(screen==='settings') send('GET_SETTINGS');
-  if(screen!=='analyzer'){ /* keep scan running if on analyzer */ }
+  if(screen!=='analyzer' && scanning){ scanning=false; send('STOP');
+    const b=document.getElementById('anBtn'); if(b)b.textContent='▶ شروع اسکن'; }
 }
 
-// === Status bar ===
 function setSbFreq(f){document.getElementById('sbFreq').textContent=(+f).toFixed(2)+' MHz';}
 function setSbRssi(r){document.getElementById('sbRssi').textContent=r+' dBm';}
 function setSbState(s){document.getElementById('sbState').textContent='● '+s;}
 
-// === Bitrate ===
 function setBitrate(br){ send('SET_BITRATE:'+br); }
 function setBitrateUI(br){
   ['rbr24','rbr48','rbr96'].forEach(id=>{
@@ -377,14 +365,12 @@ function setBitrateUI(br){
   else if(br==9.6){const e=document.getElementById('rbr96'); if(e)e.classList.add('active');}
 }
 
-// === OOK ===
 function toggleOOK(){ send('TOGGLE_OOK'); }
 function setOokUI(on){
   const b=document.getElementById('setOok');
   if(b) b.textContent='OOK: '+(on?'روشن':'خاموش');
 }
 
-// === Recording ===
 function beginRecord(){
   const n=(document.getElementById('recName').value||'').trim()||('sig_'+Date.now());
   const f=parseFloat(document.getElementById('recFreq').value||'433.92');
@@ -401,7 +387,6 @@ function cancelRecord(){
   document.getElementById('recOverlay').classList.remove('active');
 }
 
-// === Scan ===
 let scanning=false;
 function toggleScan(){
   scanning=!scanning;
@@ -421,7 +406,6 @@ function setTargetFreq(){
   if(f>=240&&f<=930) send('SET_FREQ:'+f);
 }
 
-// === Saved list ===
 function renderList(list){
   const el=document.getElementById('savedList');
   if(!list||!list.length){ el.innerHTML='<div class="empty">خالی — ابتدا از Read استفاده کن</div>'; return; }
@@ -438,7 +422,6 @@ function playSig(id){ send('PLAY:'+id); }
 function delSig(id){ if(confirm('حذف شود؟')) send('DEL:'+id); }
 function clearAll(){ if(confirm('همه سیگنال‌ها حذف شوند؟')) send('CLEAR_ALL'); }
 
-// === Settings ===
 function applySettings(d){
   document.getElementById('setFreq').value=d.freq;
   document.getElementById('setBitrate').value=d.bitrate;
@@ -567,7 +550,7 @@ void reinitRadio(){
   radio.setTransmitPower((byte)map(cfgPower,-1,20,0,7));
   radio.setPacketHandling(false);
   radio.setManchesterEncoding(false);
-  radio.turnOn();
+  radio.startListening();          // ← اصلاح: به حالت RX برو
   pinMode(PIN_CS,OUTPUT);
   digitalWrite(PIN_CS,HIGH);
   Serial.println("OK");
@@ -601,8 +584,8 @@ void doScan(){
   if(!scanning) return;
   if(currentFreq>scanEnd) currentFreq=scanStart;
   radio.setFrequency(currentFreq);
-  radio.turnOn();
-  delay(30);
+  radio.startListening();          // ← اصلاح
+  delay(50);
   int rssi=readRssi();
   ws.textAll("{\"type\":\"SCAN\",\"freq\":"+String(currentFreq,2)+",\"rssi\":"+String(rssi)+"}");
   currentFreq+=scanStep;
@@ -612,8 +595,8 @@ void doScan(){
 void doDiagnostic(){
   if(!diagnosticMode) return;
   radio.setFrequency(currentFreq);
-  radio.turnOn();
-  delay(30);
+  radio.startListening();          // ← اصلاح
+  delay(50);
   byte raw=readRssiReg();
   int rssi=(int)(0.5f*raw)-131;
   ws.textAll("{\"type\":\"DIAG\",\"freq\":"+String(currentFreq,2)+",\"raw\":"+String(raw)+",\"dbm\":"+String(rssi)+"}");
@@ -629,7 +612,7 @@ void startRecording(float freq,const char* name){
   strncpy(recName,name,NAME_LEN-1); recName[NAME_LEN-1]=0;
   recFreq=freq;
   radio.setFrequency(recFreq);
-  radio.turnOn();
+  radio.startListening();          // ← اصلاح
   delay(30);
   sendStatus("🎙 آماده ضبط");
 }
@@ -697,7 +680,7 @@ void replaySignal(int id){
       delay(20);
       radio.sendPacket((uint8_t)len,buf);
       delay(60);
-      radio.turnOn();
+      radio.startListening();      // ← اصلاح
       sendStatus("📡 ارسال شد: "+String(signals[i].name));
       return;
     }
