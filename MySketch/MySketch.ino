@@ -1,5 +1,5 @@
 /*
- * Si4432 BPS1EZ (Rev B1) Universal RF Remote Replay Tool
+ * Si4432 BPS1EZ Universal RF Remote Replay Tool
  * ESP32 DevKit V1 + Si4432
  * Library: jnsbyr/Arduino-SI4432 (OOK + SPI Transactions)
  * Features: Manual Freq, Scan, Record, Replay, Settings, OOK/FSK, OTA
@@ -32,7 +32,6 @@ float cfgFreq = 433.92;
 float cfgBitrate = 4.8;
 float cfgFreqDev = 5.0;
 int8_t cfgPower = 20;
-uint8_t cfgPreamble = 16;
 int cfgRssiThreshold = -75;
 float scanStart = 430.0;
 float scanEnd   = 440.0;
@@ -129,7 +128,6 @@ input[type=number],input[type=text]{flex:1;background:#0a0e17;color:#0f0;border:
 <div class="card"><h3 style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📻 پارامترها</h3>
 <div class="row"><span class="label">فرکانس</span><input type="number" id="setFreq" step="0.1" value="433.92"></div>
 <div class="row"><span class="label">بیت‌ریت</span><input type="number" id="setBitrate" step="0.1" value="4.8"></div>
-<div class="row"><span class="label">انحراف</span><input type="number" id="setFreqDev" step="0.1" value="5.0"></div>
 <div class="row"><span class="label">توان</span><input type="number" id="setPower" step="3" value="20" min="-1" max="20"></div>
 </div>
 <div class="card"><h3 style="color:#00e5ff;font-size:.9em;margin-bottom:8px">🔍 اسکن</h3>
@@ -177,7 +175,6 @@ function renderList(list){const el=document.getElementById('list');
 function loadSettings(){send('GET_SETTINGS');}
 function applySettings(d){document.getElementById('setFreq').value=d.freq;
   document.getElementById('setBitrate').value=d.bitrate;
-  document.getElementById('setFreqDev').value=d.freqDev;
   document.getElementById('setPower').value=d.power;
   document.getElementById('setScanStart').value=d.scanStart;
   document.getElementById('setScanEnd').value=d.scanEnd;
@@ -185,7 +182,6 @@ function applySettings(d){document.getElementById('setFreq').value=d.freq;
   document.getElementById('setRssiTh').value=d.rssiThreshold;}
 function saveSettings(){const s={freq:parseFloat(document.getElementById('setFreq').value),
   bitrate:parseFloat(document.getElementById('setBitrate').value),
-  freqDev:parseFloat(document.getElementById('setFreqDev').value),
   power:parseInt(document.getElementById('setPower').value),
   scanStart:parseFloat(document.getElementById('setScanStart').value),
   scanEnd:parseFloat(document.getElementById('setScanEnd').value),
@@ -227,7 +223,6 @@ void notifySettings() {
   String out = "{\"type\":\"SETTINGS\",\"data\":{";
   out += "\"freq\":" + String(cfgFreq, 2);
   out += ",\"bitrate\":" + String(cfgBitrate, 2);
-  out += ",\"freqDev\":" + String(cfgFreqDev, 2);
   out += ",\"power\":" + String(cfgPower);
   out += ",\"scanStart\":" + String(scanStart, 2);
   out += ",\"scanEnd\":" + String(scanEnd, 2);
@@ -241,7 +236,6 @@ void loadSettings() {
   prefs.begin("rfcfg", true);
   cfgFreq = prefs.getFloat("freq", 433.92);
   cfgBitrate = prefs.getFloat("bitrate", 4.8);
-  cfgFreqDev = prefs.getFloat("freqDev", 5.0);
   cfgPower = prefs.getInt("power", 20);
   cfgRssiThreshold = prefs.getInt("rssiTh", -75);
   scanStart = prefs.getFloat("scanStart", 430.0);
@@ -253,7 +247,7 @@ void loadSettings() {
 void saveSettingsToPrefs() {
   prefs.begin("rfcfg", false);
   prefs.putFloat("freq", cfgFreq); prefs.putFloat("bitrate", cfgBitrate);
-  prefs.putFloat("freqDev", cfgFreqDev); prefs.putInt("power", cfgPower);
+  prefs.putInt("power", cfgPower);
   prefs.putInt("rssiTh", cfgRssiThreshold);
   prefs.putFloat("scanStart", scanStart); prefs.putFloat("scanEnd", scanEnd);
   prefs.putFloat("scanStep", scanStep); prefs.putBool("ook", cfgOOKMode);
