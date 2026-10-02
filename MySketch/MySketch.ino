@@ -1,9 +1,8 @@
 /*
  * Si4432 RF Scanner / Recorder / Replayer
  * ESP32 DevKit V1 + Si4432 (BPS1EZ - Rev B1)
- * UI: WebSocket + Mobile Browser
- * OTA: ElegantOTA (browser-based)
- * Libs: RadioLib 6.5.0, ArduinoJson 7.2.0, ESPAsyncWebServer (ESP32Async), ElegantOTA 3.1.6
+ * Libs: RadioLib 6.5.0, ESPAsyncWebServer (ESP32Async), ElegantOTA 3.1.6
+ * No ArduinoJson dependency - JSON built manually
  */
 
 #include <Arduino.h>
@@ -12,7 +11,6 @@
 #include <LittleFS.h>
 #include <RadioLib.h>
 #include <ESPAsyncWebServer.h>
-#include <ArduinoJson.h>
 #include <ElegantOTA.h>
 
 // ==================== پین‌ها ====================
@@ -126,17 +124,19 @@ function connect(){
   ws.onopen = () => { setStatus('متصل'); send('LIST'); };
   ws.onclose = () => { setStatus('قطع — تلاش مجدد'); setTimeout(connect, 2000); };
   ws.onmessage = (e) => {
-    const m = JSON.parse(e.data);
-    if (m.type === 'SCAN') {
-      document.getElementById('freq').textContent = m.freq.toFixed(2);
-      const pct = Math.max(0, Math.min(100, (m.rssi + 100) * 1.5));
-      const bar = document.getElementById('rssiBar');
-      bar.style.width = pct + '%';
-      bar.style.background = m.rssi > -70 ? '#00e5ff' : m.rssi > -85 ? '#f9a825' : '#ff3d71';
-      document.getElementById('rssiTxt').textContent = 'RSSI: ' + m.rssi + ' dBm';
-    }
-    if (m.type === 'SIGNALS') renderList(m.list);
-    if (m.type === 'STATUS') setStatus(m.msg);
+    try {
+      const m = JSON.parse(e.data);
+      if (m.type === 'SCAN') {
+        document.getElementById('freq').textContent = m.freq.toFixed(2);
+        const pct = Math.max(0, Math.min(100, (m.rssi + 100) * 1.5));
+        const bar = document.getElementById('rssiBar');
+        bar.style.width = pct + '%';
+        bar.style.background = m.rssi > -70 ? '#00e5ff' : m.rssi > -85 ? '#f9a825' : '#ff3d71';
+        document.getElementById('rssiTxt').textContent = 'RSSI: ' + m.rssi + ' dBm';
+      }
+      if (m.type === 'SIGNALS') renderList(m.list);
+      if (m.type === 'STATUS') setStatus(m.msg);
+    } catch(err) { console.log('bad json', e.data); }
   };
 }
 function send(cmd){ if (ws && ws.readyState === 1) ws.send(cmd); }
@@ -159,35 +159,45 @@ connect();
 // ==================== forward declarations ====================
 void finishRecording();
 
-// ==================== اطلاع به UI (ArduinoJson v7) ====================
+// ==================== اطلاع به UI (بدون ArduinoJson) ====================
 void notifyScan(float freq, int rssi) {
-  JsonDocument doc;
-  doc["type"] = "SCAN";
-  doc["freq"] = freq;
-  doc["rssi"] = rssi;
-  String out; serializeJson(doc, out);
+  String out;
+  out.reserve(64);
+  out  = "{\"type\":\"SCAN\",\"freq\":";
+  out += String(freq, 2);
+  out += ",\"rssi\":";
+  out += rssi;
+  out += "}";
   ws.textAll(out);
 }
 
 void notifyStatus(const String& msg) {
-  JsonDocument doc;
-  doc["type"] = "STATUS";
-  doc["msg"]  = msg;
-  String out; serializeJson(doc, out);
+  String safe = msg;
+  safe.replace("\\", "\\\\");
+  safe.replace("\"", "\\\"");
+  String out;
+  out.reserve(safe.length() + 32);
+  out  = "{\"type\":\"STATUS\",\"msg\":\"";
+  out += safe;
+  out += "\"}";
   ws.textAll(out);
 }
 
 void notifySignalList() {
-  JsonDocument doc;
-  doc["type"] = "SIGNALS";
-  JsonArray arr = doc["list"].to<JsonArray>();
+  String out;
+  out.reserve(64 + sigCount * 64);
+  out  = "{\"type\":\"SIGNALS\",\"list\":[";
   for (uint16_t i = 0; i < sigCount; i++) {
-    JsonObject o = arr.add<JsonObject>();
-    o["id"]   = sigIndex[i].id;
-    o["freq"] = sigIndex[i].freq;
-    o["len"]  = sigIndex[i].len;
+    if (i > 0) out += ",";
+    out += "{\"id\":";
+    out += sigIndex[i].id;
+    out += ",\"freq\":";
+    out += String(sigIndex[i].freq, 2);
+    out += ",\"len\":";
+    out += sigIndex[i].len;
+    out += "}";
   }
-  String out; serializeJson(doc, out);
+  out += "]}";
   ws.textAll(out);
 }
 
@@ -252,7 +262,6 @@ bool loadSignal(uint16_t id, float* freq, uint8_t* buf, uint16_t* len) {
 // ==================== Si4432 ====================
 void initRadio() {
   Serial.print(F("[Si4432] init... "));
-  // RadioLib 6.5.0 Si4432::begin: (freq, br, freqDev, rxBw, power, preambleLen)
   int state = radio.begin(433.0, 4.8, 5.0, 181.1, 20, 16);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.printf("failed, code %d\n", state);
