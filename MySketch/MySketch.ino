@@ -1,7 +1,7 @@
 /*
  * Si4432 BPS1EZ (Rev B1) Universal RF Remote Replay Tool
  * ESP32 DevKit V1 + Si4432
- * Library: nopnop2002/Arduino-SI4432 (OOK + SPI Transactions)
+ * Library: jnsbyr/Arduino-SI4432 (OOK + SPI Transactions)
  * Features: Manual Freq, Scan, Record, Replay, Settings, OOK/FSK, OTA
  */
 
@@ -10,7 +10,7 @@
 #include <SPI.h>
 #include <LittleFS.h>
 #include <Preferences.h>
-#include <Si4432.h>
+#include <Si443x.h>
 #include <ESPAsyncWebServer.h>
 #include <ElegantOTA.h>
 
@@ -40,7 +40,7 @@ float scanStep  = 0.1;
 bool  cfgOOKMode = true;
 
 // ==================== Si4432 ====================
-Si4432 radio(PIN_CS, PIN_SDN, PIN_IRQ, PIN_GPIO);
+Si443x radio(PIN_CS, PIN_SDN, PIN_IRQ, PIN_GPIO);
 
 // ==================== State ====================
 bool scanning = false;
@@ -303,20 +303,14 @@ bool loadSignal(uint16_t id, float* freq, uint8_t* buf, uint16_t* len) {
 // ==================== Radio Init ====================
 void reinitRadio() {
   Serial.print("[Si4432] init... ");
-  if (!radio.init()) {
-    Serial.println("FAILED");
-    notifyStatus("خطای راه‌اندازی Si4432");
-    return;
-  }
-
+  radio.init();
   radio.setFrequency(cfgFreq);
   radio.setBaudRate(cfgBitrate);
-  radio.setModulationType(cfgOOKMode ? OOK : GFSK);
+  radio.setModulationType(cfgOOKMode ? Si443x::OOK : Si443x::GFSK);
   radio.setTxPower(cfgPower);
   radio.setPacketHandling(false);
   radio.setManchesterEncoding(false);
   radio.turnOn();
-
   Serial.println("OK (OOK=" + String(cfgOOKMode) + ")");
 }
 
