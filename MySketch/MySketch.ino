@@ -1,8 +1,7 @@
 /*
  * Si4432 BPS1EZ Universal RF Remote Replay Tool
  * ESP32 DevKit V1 + Si4432
- * Library: nopnop2002/Arduino-SI4432 (OOK + Manchester)
- * Features: Manual Freq, Scan, Record, Replay, Settings, OOK/FSK, OTA
+ * Library: nopnop2002/Arduino-SI4432
  */
 
 #include <Arduino.h>
@@ -292,7 +291,7 @@ bool loadSignal(uint16_t id, float* freq, uint8_t* buf, uint16_t* len) {
   return false;
 }
 
-// ==================== Radio Init (nopnop2002) ====================
+// ==================== Radio Init ====================
 void reinitRadio() {
   Serial.print("[Si4432] init... ");
   if (!radio.init()) {
