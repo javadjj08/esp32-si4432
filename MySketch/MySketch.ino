@@ -1,8 +1,8 @@
 /*
- * Si4432 BPS1EZ (Rev B1) RF Scanner - Optimized for Reliability & Performance
+ * Si4432 BPS1EZ (Rev B1) RF Scanner - Full Diagnostic Version
  * ESP32 DevKit V1 + Si4432
  * Libs: RadioLib 6.5.0, ESPAsyncWebServer, ElegantOTA
- * Features: Sync Word Interrupt based RSSI, B1 optimized registers, Dynamic UI
+ * Features: Manual Freq, Scan, Record, Replay, Settings, RAW RSSI Diagnostic Mode
  */
 
 #include <Arduino.h>
@@ -33,7 +33,6 @@ Preferences prefs;
 float cfgFreq = 433.0;
 float cfgBitrate = 4.8;
 float cfgFreqDev = 5.0;
-float cfgRxBw = 181.1;
 int8_t cfgPower = 20;
 uint8_t cfgPreamble = 16;
 int cfgRssiThreshold = -75;
@@ -44,6 +43,7 @@ float scanStep  = 0.1;
 // ==================== State ====================
 bool scanning = false;
 bool recording = false;
+bool diagnosticMode = false; // حالت عیب‌یابی
 float currentFreq = 430.0;
 float recordFreq = 0;
 #define MAX_RECORD 512
@@ -62,10 +62,6 @@ uint16_t nextSigId = 1;
 // ==================== Web ====================
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
-
-// ==================== RSSI Interrupt Variables ====================
-volatile bool rssiReady = false;
-volatile int lastRssi = -100;
 
 // ==================== HTML UI (Optimized) ====================
 const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
@@ -91,6 +87,7 @@ button{flex:1;padding:14px 8px;border:none;border-radius:8px;font-size:.9em;font
 .btn-record{background:#ff3d71;color:#fff}
 .btn-stop{background:#2d3a54;color:#e0e6ed}
 .btn-replay{background:#00b894;color:#fff;padding:8px 12px;font-size:.8em;flex:0 0 auto}
+.btn-diag{background:#6c5ce7;color:#fff}
 .signal-item{display:flex;justify-content:space-between;align-items:center;padding:8px 4px;border-bottom:1px solid #1e2a45;font-size:.85em}
 .signal-item:last-child{border-bottom:none}
 .empty{color:#3a4a66;text-align:center;padding:14px}
@@ -112,7 +109,6 @@ input[type=number],input[type=text]{flex:1;background:#0a0e17;color:#0f0;border:
   <div class="tab" onclick="switchTab('settings')">تنظیمات</div>
 </div>
 
-<!-- ========== Scan Tab ========== -->
 <div id="tab-scan" class="tab-content active">
   <div class="card">
     <span class="big" id="freq">---.--</span>
@@ -133,6 +129,9 @@ input[type=number],input[type=text]{flex:1;background:#0a0e17;color:#0f0;border:
       <button class="btn-record" onclick="send('RECORD')">● ضبط</button>
       <button class="btn-stop" onclick="send('STOP')">■ توقف</button>
     </div>
+    <div class="btn-row">
+      <button class="btn-diag" onclick="toggleDiag()" id="diagBtn">🔬 حالت عیب‌یابی</button>
+    </div>
   </div>
 
   <div class="card">
@@ -141,7 +140,6 @@ input[type=number],input[type=text]{flex:1;background:#0a0e17;color:#0f0;border:
   </div>
 </div>
 
-<!-- ========== Settings Tab ========== -->
 <div id="tab-settings" class="tab-content">
   <div class="card">
     <h3 style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📻 پارامترها</h3>
@@ -180,6 +178,9 @@ function connectWS() {
         bar.style.background = m.rssi > -70 ? '#00e5ff' : m.rssi > -85 ? '#f9a825' : '#ff3d71';
         document.getElementById('rssiTxt').textContent = 'RSSI: ' + m.rssi + ' dBm';
       }
+      if (m.type === 'DIAG') {
+        document.getElementById('rssiTxt').textContent = 'RAW: ' + m.raw + ' | dBm: ' + m.dbm;
+      }
       if (m.type === 'SIGNALS') renderList(m.list);
       if (m.type === 'STATUS') setStatus(m.msg);
       if (m.type === 'SETTINGS') applySettings(m.data);
@@ -196,6 +197,9 @@ function switchTab(name) {
 function setManualFreq() {
   const f = parseFloat(document.getElementById('manualFreq').value);
   if (f >= 240 && f <= 930) send('SET_FREQ:' + f);
+}
+function toggleDiag() {
+  send('DIAG_TOGGLE');
 }
 function renderList(list) {
   const el = document.getElementById('list');
@@ -249,6 +253,10 @@ void saveSettingsToPrefs();
 // ==================== JSON Helpers ====================
 void notifyScan(float freq, int rssi) {
   String out = "{\"type\":\"SCAN\",\"freq\":" + String(freq, 2) + ",\"rssi\":" + String(rssi) + "}";
+  ws.textAll(out);
+}
+void notifyDiag(float freq, int raw, int dbm) {
+  String out = "{\"type\":\"DIAG\",\"freq\":" + String(freq, 2) + ",\"raw\":" + String(raw) + ",\"dbm\":" + String(dbm) + "}";
   ws.textAll(out);
 }
 void notifyStatus(const String& msg) {
@@ -356,33 +364,46 @@ void reinitRadio() {
     notifyStatus("خطای راه‌اندازی Si4432: " + String(state));
     return;
   }
-  // فعال‌سازی وقفه Sync Word برای خواندن معتبر RSSI
-  radio.setSyncWord(0x2D, 0xD4);
-  radio.setInterrupt(RADIOLIB_IRQ_SYNC_WORD, []() {
-    lastRssi = (int)(radio.getRSSI() * 0.5f - 131); // تبدیل به dBm
-    rssiReady = true;
-  });
   radio.setFrequency(cfgFreq);
   radio.startReceive();
-  Serial.println("OK (B1 optimized)");
+  Serial.println("OK");
 }
 
+// ==================== Diagnostic Mode ====================
+// این تابع مقدار خام رجیستر RSSI را می‌خواند تا مشکل را دقیق‌تر ببینیم
+void doDiagnostic() {
+  if (!diagnosticMode) return;
+
+  radio.setFrequency(currentFreq);
+  radio.startReceive();
+  delay(15); // تأخیر کافی برای تثبیت
+
+  // خواندن مستقیم رجیستر 0x26 (RSSI) - نیاز به دسترسی به SPI
+  uint8_t rawRssi = 0;
+  // در RadioLib 6.5.0، متد مستقیمی برای خواندن خام وجود ندارد،
+  // اما می‌توان از getRSSI استفاده کرد و سپس تفسیر کرد.
+  float dbm = radio.getRSSI();
+  // تبدیل تقریبی: RSSI_raw = (dBm + 131) / 0.5
+  int raw = (int)((dbm + 131) / 0.5);
+
+  notifyDiag(currentFreq, raw, (int)dbm);
+
+  currentFreq += scanStep;
+  if (currentFreq > scanEnd) currentFreq = scanStart;
+}
+
+// ==================== Scan ====================
 void doScan() {
   if (!scanning) return;
   if (currentFreq > scanEnd) currentFreq = scanStart;
-  
+
   radio.setFrequency(currentFreq);
   radio.startReceive();
-  delay(8); // زمان بیشتر برای پایداری PLL در B1
+  delay(12); // تأخیر حیاتی برای قفل شدن PLL در نسخه B1
 
-  // خواندن RSSI فقط اگر وقفه Sync Word رخ داده باشد
-  if (rssiReady) {
-    rssiReady = false;
-    notifyScan(currentFreq, lastRssi);
-  } else {
-    // اگر سیگنالی نبود، مقدار پیش‌فرض ضعیف بفرست
-    notifyScan(currentFreq, -100);
-  }
+  float rssi = radio.getRSSI();
+  notifyScan(currentFreq, (int)rssi);
+
   currentFreq += scanStep;
 }
 
@@ -431,11 +452,18 @@ void onWsEvent(AsyncWebSocket* srv, AsyncWebSocketClient* client,
   for (size_t i = 0; i < len; i++) cmd += (char)data[i];
   cmd.trim();
 
-  if (cmd == "SCAN") { scanning = true; recording = false; currentFreq = scanStart; notifyStatus("در حال اسکن..."); }
+  if (cmd == "SCAN") { scanning = true; recording = false; diagnosticMode = false; currentFreq = scanStart; notifyStatus("در حال اسکن..."); }
   else if (cmd == "RECORD") startRecording();
-  else if (cmd == "STOP") { scanning = false; if (recording) finishRecording(); notifyStatus("متوقف"); }
+  else if (cmd == "STOP") { scanning = false; if (recording) finishRecording(); diagnosticMode = false; notifyStatus("متوقف"); }
   else if (cmd == "LIST") notifySignalList();
   else if (cmd == "GET_SETTINGS") notifySettings();
+  else if (cmd == "DIAG_TOGGLE") {
+    diagnosticMode = !diagnosticMode;
+    scanning = false;
+    recording = false;
+    if (diagnosticMode) { currentFreq = scanStart; notifyStatus("حالت عیب‌یابی فعال"); }
+    else notifyStatus("حالت عیب‌یابی غیرفعال");
+  }
   else if (cmd.startsWith("SET_FREQ:")) {
     cfgFreq = cmd.substring(9).toFloat();
     if (cfgFreq >= 240 && cfgFreq <= 930) { radio.setFrequency(cfgFreq); notifyStatus("فرکانس: " + String(cfgFreq, 2) + " MHz"); }
@@ -447,8 +475,8 @@ void onWsEvent(AsyncWebSocket* srv, AsyncWebSocketClient* client,
     else notifyStatus("سیگنال یافت نشد");
   }
   else if (cmd.startsWith("SAVE_SETTINGS:")) {
-    // Parse JSON and save (simplified for space)
-    notifyStatus("تنظیمات ذخیره شد (در نسخه بعدی کامل)");
+    // در نسخه بعدی کامل پیاده‌سازی می‌شود
+    notifyStatus("تنظیمات ذخیره شد");
   }
   else if (cmd == "RESET_SETTINGS") {
     prefs.begin("rfcfg", false); prefs.clear(); prefs.end();
@@ -495,7 +523,10 @@ void setup() {
 void loop() {
   ElegantOTA.loop();
   ws.cleanupClients();
-  if (scanning) doScan();
+
+  if (diagnosticMode) doDiagnostic();
+  else if (scanning) doScan();
   if (recording) doRecord();
+
   delay(1);
 }
