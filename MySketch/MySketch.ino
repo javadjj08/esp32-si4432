@@ -2,7 +2,6 @@
  * Si4432 BPS1EZ Universal RF Remote Replay Tool
  * ESP32 DevKit V1 + Si4432
  * Library: nopnop2002/Arduino-SI4432
- * Features: Manual Freq, Scan, Record, Replay, Settings, OOK/FSK, OTA
  */
 
 #include <Arduino.h>
@@ -197,6 +196,8 @@ void finishRecording();
 void reinitRadio();
 void loadSettings();
 void saveSettingsToPrefs();
+byte readRssiRegister();
+int readRSSI();
 
 // ==================== JSON Helpers ====================
 void notifyScan(float freq, int rssi) {
@@ -307,15 +308,26 @@ void reinitRadio() {
   radio.setPacketHandling(false);
   radio.setManchesterEncoding(false);
   radio.turnOn();
+  pinMode(PIN_CS, OUTPUT);
+  digitalWrite(PIN_CS, HIGH);
   Serial.println("OK (OOK=" + String(cfgOOKMode) + ")");
 }
 
-// ==================== Read RSSI ====================
+// ==================== RSSI Direct SPI ====================
+byte readRssiRegister() {
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_CS, LOW);
+  delayMicroseconds(2);
+  SPI.transfer(0x26 & 0x7F);  // read command, address 0x26 (RSSI)
+  byte result = SPI.transfer(0x00);
+  digitalWrite(PIN_CS, HIGH);
+  SPI.endTransaction();
+  return result;
+}
+
 int readRSSI() {
-  // خواندن مستقیم رجیستر RSSI (0x26)
-  byte raw = radio.ReadRegister(Si4432::REG_RSSI);
-  // تبدیل به dBm: هر بیت 0.5 dB، مقدار خام 0..255
-  int dbm = (int)(raw * 0.5) - 131;
+  byte raw = readRssiRegister();
+  int dbm = -(int)(raw / 2);
   return dbm;
 }
 
@@ -342,8 +354,8 @@ void doDiagnostic() {
   radio.turnOn();
   delay(50);
 
-  int rssi = readRSSI();
-  byte raw = radio.ReadRegister(Si4432::REG_RSSI);
+  byte raw = readRssiRegister();
+  int rssi = -(int)(raw / 2);
   notifyDiag(currentFreq, raw, rssi);
 
   Serial.print("[DIAG] ");
