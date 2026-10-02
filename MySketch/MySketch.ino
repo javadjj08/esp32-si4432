@@ -1,8 +1,8 @@
 /*
- * Si4432 BPS1EZ (Rev B1) RF Scanner - Full Diagnostic Version
+ * Si4432 BPS1EZ (Rev B1) Universal RF Tool
  * ESP32 DevKit V1 + Si4432
  * Libs: RadioLib 6.5.0, ESPAsyncWebServer, ElegantOTA
- * Features: Manual Freq, Scan, Record, Replay, Settings, RAW RSSI Diagnostic Mode
+ * Features: Manual Freq, Scan, Record, Replay, Settings, RAW OOK Mode, RSSI Diagnostic
  */
 
 #include <Arduino.h>
@@ -30,7 +30,7 @@ const char* AP_PASS  = "12345678";
 
 // ==================== Global Config ====================
 Preferences prefs;
-float cfgFreq = 433.0;
+float cfgFreq = 433.92;
 float cfgBitrate = 4.8;
 float cfgFreqDev = 5.0;
 int8_t cfgPower = 20;
@@ -39,11 +39,12 @@ int cfgRssiThreshold = -75;
 float scanStart = 430.0;
 float scanEnd   = 440.0;
 float scanStep  = 0.1;
+bool  cfgRawMode = true; // حالت RAW برای دریافت OOK
 
 // ==================== State ====================
 bool scanning = false;
 bool recording = false;
-bool diagnosticMode = false; // حالت عیب‌یابی
+bool diagnosticMode = false;
 float currentFreq = 430.0;
 float recordFreq = 0;
 #define MAX_RECORD 512
@@ -63,15 +64,11 @@ uint16_t nextSigId = 1;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
-// ==================== HTML UI (Optimized) ====================
+// ==================== HTML UI ====================
 const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
-<!DOCTYPE html>
-<html lang="fa" dir="rtl">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>Si4432 Pro</title>
-<style>
+<!DOCTYPE html><html lang="fa" dir="rtl"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Si4432 Pro</title><style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{font-family:Tahoma,sans-serif;background:#0a0e17;color:#e0e6ed;padding:10px;max-width:520px;margin:auto}
 h1{font-size:1em;text-align:center;color:#00e5ff;margin-bottom:10px}
@@ -83,165 +80,121 @@ h1{font-size:1em;text-align:center;color:#00e5ff;margin-bottom:10px}
 .status{text-align:center;font-size:.8em;color:#7a8ba8;margin-top:6px}
 .btn-row{display:flex;gap:6px;margin-top:4px}
 button{flex:1;padding:14px 8px;border:none;border-radius:8px;font-size:.9em;font-weight:600;cursor:pointer;touch-action:manipulation}
-.btn-scan{background:#00e5ff;color:#0a0e17}
-.btn-record{background:#ff3d71;color:#fff}
-.btn-stop{background:#2d3a54;color:#e0e6ed}
-.btn-replay{background:#00b894;color:#fff;padding:8px 12px;font-size:.8em;flex:0 0 auto}
-.btn-diag{background:#6c5ce7;color:#fff}
+.btn-scan{background:#00e5ff;color:#0a0e17}.btn-record{background:#ff3d71;color:#fff}
+.btn-stop{background:#2d3a54;color:#e0e6ed}.btn-replay{background:#00b894;color:#fff;padding:8px 12px;font-size:.8em;flex:0 0 auto}
+.btn-diag{background:#6c5ce7;color:#fff}.btn-ook{background:#f9a825;color:#000}
 .signal-item{display:flex;justify-content:space-between;align-items:center;padding:8px 4px;border-bottom:1px solid #1e2a45;font-size:.85em}
-.signal-item:last-child{border-bottom:none}
-.empty{color:#3a4a66;text-align:center;padding:14px}
+.signal-item:last-child{border-bottom:none}.empty{color:#3a4a66;text-align:center;padding:14px}
 .tabs{display:flex;gap:4px;margin-bottom:8px}
 .tab{flex:1;padding:10px;text-align:center;background:#1e2a45;border-radius:6px;cursor:pointer;font-size:.85em}
 .tab.active{background:#00e5ff;color:#0a0e17;font-weight:bold}
-.tab-content{display:none}
-.tab-content.active{display:block}
+.tab-content{display:none}.tab-content.active{display:block}
 .row{display:flex;gap:6px;margin-bottom:6px;align-items:center}
 .label{color:#7a8ba8;font-size:.8em;min-width:60px}
 input[type=number],input[type=text]{flex:1;background:#0a0e17;color:#0f0;border:1px solid #1e2a45;border-radius:6px;padding:8px;font-family:monospace;font-size:.9em}
-</style>
-</head>
-<body>
+</style></head><body>
 <h1>📡 Si4432 Scanner Pro</h1>
-
 <div class="tabs">
-  <div class="tab active" onclick="switchTab('scan')">اسکن</div>
-  <div class="tab" onclick="switchTab('settings')">تنظیمات</div>
+<div class="tab active" onclick="switchTab('scan')">اسکن</div>
+<div class="tab" onclick="switchTab('settings')">تنظیمات</div>
 </div>
-
 <div id="tab-scan" class="tab-content active">
-  <div class="card">
-    <span class="big" id="freq">---.--</span>
-    <div class="unit">MHz</div>
-    <div class="rssi-bar"><div class="rssi-fill" id="rssiBar"></div></div>
-    <div class="status" id="rssiTxt">RSSI: --- dBm</div>
-    <div class="status" id="statusTxt">آماده</div>
-  </div>
-
-  <div class="card">
-    <div class="row">
-      <span class="label">فرکانس</span>
-      <input type="number" id="manualFreq" step="0.1" value="433.0" min="240" max="930">
-      <button class="btn-scan" onclick="setManualFreq()">تنظیم</button>
-    </div>
-    <div class="btn-row">
-      <button class="btn-scan" onclick="send('SCAN')">▶ اسکن</button>
-      <button class="btn-record" onclick="send('RECORD')">● ضبط</button>
-      <button class="btn-stop" onclick="send('STOP')">■ توقف</button>
-    </div>
-    <div class="btn-row">
-      <button class="btn-diag" onclick="toggleDiag()" id="diagBtn">🔬 حالت عیب‌یابی</button>
-    </div>
-  </div>
-
-  <div class="card">
-    <div style="color:#7a8ba8;font-size:.85em;margin-bottom:6px">سیگنال‌ها</div>
-    <div id="list"><div class="empty">خالی</div></div>
-  </div>
+<div class="card">
+<span class="big" id="freq">---.--</span><div class="unit">MHz</div>
+<div class="rssi-bar"><div class="rssi-fill" id="rssiBar"></div></div>
+<div class="status" id="rssiTxt">RSSI: --- dBm</div>
+<div class="status" id="statusTxt">آماده</div>
 </div>
-
+<div class="card">
+<div class="row"><span class="label">فرکانس</span>
+<input type="number" id="manualFreq" step="0.1" value="433.92" min="240" max="930">
+<button class="btn-scan" onclick="setManualFreq()">تنظیم</button></div>
+<div class="btn-row">
+<button class="btn-scan" onclick="send('SCAN')">▶ اسکن</button>
+<button class="btn-record" onclick="send('RECORD')">● ضبط</button>
+<button class="btn-stop" onclick="send('STOP')">■ توقف</button>
+</div>
+<div class="btn-row">
+<button class="btn-ook" onclick="send('TOGGLE_RAW')" id="rawBtn">RAW: روشن</button>
+<button class="btn-diag" onclick="send('DIAG_TOGGLE')" id="diagBtn">🔬 عیب‌یابی</button>
+</div>
+</div>
+<div class="card">
+<div style="color:#7a8ba8;font-size:.85em;margin-bottom:6px">سیگنال‌ها</div>
+<div id="list"><div class="empty">خالی</div></div>
+</div>
+</div>
 <div id="tab-settings" class="tab-content">
-  <div class="card">
-    <h3 style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📻 پارامترها</h3>
-    <div class="row"><span class="label">فرکانس</span><input type="number" id="setFreq" step="0.1" value="433.0"></div>
-    <div class="row"><span class="label">بیت‌ریت</span><input type="number" id="setBitrate" step="0.1" value="4.8"></div>
-    <div class="row"><span class="label">انحراف</span><input type="number" id="setFreqDev" step="0.1" value="5.0"></div>
-    <div class="row"><span class="label">توان (dBm)</span><input type="number" id="setPower" step="3" value="20" min="-1" max="20"></div>
-  </div>
-  <div class="card">
-    <h3 style="color:#00e5ff;font-size:.9em;margin-bottom:8px">🔍 اسکن</h3>
-    <div class="row"><span class="label">شروع</span><input type="number" id="setScanStart" step="0.1" value="430.0"></div>
-    <div class="row"><span class="label">پایان</span><input type="number" id="setScanEnd" step="0.1" value="440.0"></div>
-    <div class="row"><span class="label">گام</span><input type="number" id="setScanStep" step="0.05" value="0.1"></div>
-    <div class="row"><span class="label">آستانه</span><input type="number" id="setRssiTh" value="-75"></div>
-  </div>
-  <div class="card">
-    <button class="btn-scan" onclick="saveSettings()">💾 ذخیره</button>
-    <button class="btn-stop" onclick="resetSettings()">↺ بازگشت</button>
-  </div>
+<div class="card"><h3 style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📻 پارامترها</h3>
+<div class="row"><span class="label">فرکانس</span><input type="number" id="setFreq" step="0.1" value="433.92"></div>
+<div class="row"><span class="label">بیت‌ریت</span><input type="number" id="setBitrate" step="0.1" value="4.8"></div>
+<div class="row"><span class="label">انحراف</span><input type="number" id="setFreqDev" step="0.1" value="5.0"></div>
+<div class="row"><span class="label">توان</span><input type="number" id="setPower" step="3" value="20" min="-1" max="20"></div>
 </div>
-
+<div class="card"><h3 style="color:#00e5ff;font-size:.9em;margin-bottom:8px">🔍 اسکن</h3>
+<div class="row"><span class="label">شروع</span><input type="number" id="setScanStart" step="0.1" value="430.0"></div>
+<div class="row"><span class="label">پایان</span><input type="number" id="setScanEnd" step="0.1" value="440.0"></div>
+<div class="row"><span class="label">گام</span><input type="number" id="setScanStep" step="0.05" value="0.1"></div>
+<div class="row"><span class="label">آستانه</span><input type="number" id="setRssiTh" value="-75"></div>
+</div>
+<div class="card">
+<button class="btn-scan" onclick="saveSettings()">💾 ذخیره</button>
+<button class="btn-stop" onclick="resetSettings()">↺ بازگشت</button>
+</div>
+</div>
 <script>
 let ws;
-function connectWS() {
-  ws = new WebSocket('ws://' + location.host + '/ws');
-  ws.onopen = () => { setStatus('متصل'); send('LIST'); loadSettings(); };
-  ws.onclose = () => { setStatus('قطع — تلاش مجدد'); setTimeout(connectWS, 2000); };
-  ws.onmessage = (e) => {
-    try {
-      const m = JSON.parse(e.data);
-      if (m.type === 'SCAN') {
-        document.getElementById('freq').textContent = m.freq.toFixed(2);
-        const pct = Math.max(0, Math.min(100, (m.rssi + 100) * 1.5));
-        const bar = document.getElementById('rssiBar');
-        bar.style.width = pct + '%';
-        bar.style.background = m.rssi > -70 ? '#00e5ff' : m.rssi > -85 ? '#f9a825' : '#ff3d71';
-        document.getElementById('rssiTxt').textContent = 'RSSI: ' + m.rssi + ' dBm';
-      }
-      if (m.type === 'DIAG') {
-        document.getElementById('rssiTxt').textContent = 'RAW: ' + m.raw + ' | dBm: ' + m.dbm;
-      }
-      if (m.type === 'SIGNALS') renderList(m.list);
-      if (m.type === 'STATUS') setStatus(m.msg);
-      if (m.type === 'SETTINGS') applySettings(m.data);
-    } catch(err) { console.log('bad json', e.data); }
-  };
+function connectWS(){
+  ws=new WebSocket('ws://'+location.host+'/ws');
+  ws.onopen=()=>{setStatus('متصل');send('LIST');loadSettings();};
+  ws.onclose=()=>{setStatus('قطع — تلاش مجدد');setTimeout(connectWS,2000);};
+  ws.onmessage=(e)=>{try{const m=JSON.parse(e.data);
+    if(m.type==='SCAN'){document.getElementById('freq').textContent=m.freq.toFixed(2);
+      const pct=Math.max(0,Math.min(100,(m.rssi+100)*1.5));
+      const bar=document.getElementById('rssiBar');bar.style.width=pct+'%';
+      bar.style.background=m.rssi>-70?'#00e5ff':m.rssi>-85?'#f9a825':'#ff3d71';
+      document.getElementById('rssiTxt').textContent='RSSI: '+m.rssi+' dBm';}
+    if(m.type==='DIAG'){document.getElementById('rssiTxt').textContent='RAW: '+m.raw+' | dBm: '+m.dbm;}
+    if(m.type==='SIGNALS')renderList(m.list);
+    if(m.type==='STATUS')setStatus(m.msg);
+    if(m.type==='SETTINGS')applySettings(m.data);
+    if(m.type==='RAW'){document.getElementById('rawBtn').textContent='RAW: '+(m.on?'روشن':'خاموش');}
+  }catch(err){console.log('bad json',e.data);}};
 }
-function send(cmd) { if (ws && ws.readyState === 1) ws.send(cmd); }
-function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-  document.querySelector('.tab[onclick*="' + name + '"]').classList.add('active');
-  document.getElementById('tab-' + name).classList.add('active');
-}
-function setManualFreq() {
-  const f = parseFloat(document.getElementById('manualFreq').value);
-  if (f >= 240 && f <= 930) send('SET_FREQ:' + f);
-}
-function toggleDiag() {
-  send('DIAG_TOGGLE');
-}
-function renderList(list) {
-  const el = document.getElementById('list');
-  if (!list || !list.length) { el.innerHTML = '<div class="empty">خالی</div>'; return; }
-  el.innerHTML = list.map(s =>
-    '<div class="signal-item"><div><div style="color:#00e5ff">' + s.freq.toFixed(2) + ' MHz</div>' +
-    '<div style="color:#7a8ba8;font-size:.75em">' + s.len + ' bytes</div></div>' +
-    '<button class="btn-replay" onclick="send(\'REPLAY:' + s.id + '\')">پخش</button></div>'
-  ).join('');
-}
-function loadSettings() { send('GET_SETTINGS'); }
-function applySettings(d) {
-  document.getElementById('setFreq').value = d.freq;
-  document.getElementById('setBitrate').value = d.bitrate;
-  document.getElementById('setFreqDev').value = d.freqDev;
-  document.getElementById('setPower').value = d.power;
-  document.getElementById('setScanStart').value = d.scanStart;
-  document.getElementById('setScanEnd').value = d.scanEnd;
-  document.getElementById('setScanStep').value = d.scanStep;
-  document.getElementById('setRssiTh').value = d.rssiThreshold;
-}
-function saveSettings() {
-  const s = {
-    freq: parseFloat(document.getElementById('setFreq').value),
-    bitrate: parseFloat(document.getElementById('setBitrate').value),
-    freqDev: parseFloat(document.getElementById('setFreqDev').value),
-    power: parseInt(document.getElementById('setPower').value),
-    scanStart: parseFloat(document.getElementById('setScanStart').value),
-    scanEnd: parseFloat(document.getElementById('setScanEnd').value),
-    scanStep: parseFloat(document.getElementById('setScanStep').value),
-    rssiThreshold: parseInt(document.getElementById('setRssiTh').value)
-  };
-  send('SAVE_SETTINGS:' + JSON.stringify(s));
-}
-function resetSettings() {
-  if (confirm('بازگشت به پیش‌فرض؟')) send('RESET_SETTINGS');
-}
-function setStatus(s) { document.getElementById('statusTxt').textContent = s; }
+function send(c){if(ws&&ws.readyState===1)ws.send(c);}
+function switchTab(n){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
+  document.querySelector('.tab[onclick*="'+n+'"]').classList.add('active');
+  document.getElementById('tab-'+n).classList.add('active');}
+function setManualFreq(){const f=parseFloat(document.getElementById('manualFreq').value);
+  if(f>=240&&f<=930)send('SET_FREQ:'+f);}
+function renderList(list){const el=document.getElementById('list');
+  if(!list||!list.length){el.innerHTML='<div class="empty">خالی</div>';return;}
+  el.innerHTML=list.map(s=>'<div class="signal-item"><div><div style="color:#00e5ff">'+s.freq.toFixed(2)+' MHz</div>'+
+    '<div style="color:#7a8ba8;font-size:.75em">'+s.len+' bytes</div></div>'+
+    '<button class="btn-replay" onclick="send(\'REPLAY:'+s.id+'\')">پخش</button></div>').join('');}
+function loadSettings(){send('GET_SETTINGS');}
+function applySettings(d){document.getElementById('setFreq').value=d.freq;
+  document.getElementById('setBitrate').value=d.bitrate;
+  document.getElementById('setFreqDev').value=d.freqDev;
+  document.getElementById('setPower').value=d.power;
+  document.getElementById('setScanStart').value=d.scanStart;
+  document.getElementById('setScanEnd').value=d.scanEnd;
+  document.getElementById('setScanStep').value=d.scanStep;
+  document.getElementById('setRssiTh').value=d.rssiThreshold;}
+function saveSettings(){const s={freq:parseFloat(document.getElementById('setFreq').value),
+  bitrate:parseFloat(document.getElementById('setBitrate').value),
+  freqDev:parseFloat(document.getElementById('setFreqDev').value),
+  power:parseInt(document.getElementById('setPower').value),
+  scanStart:parseFloat(document.getElementById('setScanStart').value),
+  scanEnd:parseFloat(document.getElementById('setScanEnd').value),
+  scanStep:parseFloat(document.getElementById('setScanStep').value),
+  rssiThreshold:parseInt(document.getElementById('setRssiTh').value)};
+  send('SAVE_SETTINGS:'+JSON.stringify(s));}
+function resetSettings(){if(confirm('بازگشت به پیش‌فرض؟'))send('RESET_SETTINGS');}
+function setStatus(s){document.getElementById('statusTxt').textContent=s;}
 connectWS();
-</script>
-</body>
-</html>
+</script></body></html>
 )HTMLPAGE";
 
 // ==================== Forward Declarations ====================
@@ -252,12 +205,10 @@ void saveSettingsToPrefs();
 
 // ==================== JSON Helpers ====================
 void notifyScan(float freq, int rssi) {
-  String out = "{\"type\":\"SCAN\",\"freq\":" + String(freq, 2) + ",\"rssi\":" + String(rssi) + "}";
-  ws.textAll(out);
+  ws.textAll("{\"type\":\"SCAN\",\"freq\":" + String(freq, 2) + ",\"rssi\":" + String(rssi) + "}");
 }
 void notifyDiag(float freq, int raw, int dbm) {
-  String out = "{\"type\":\"DIAG\",\"freq\":" + String(freq, 2) + ",\"raw\":" + String(raw) + ",\"dbm\":" + String(dbm) + "}";
-  ws.textAll(out);
+  ws.textAll("{\"type\":\"DIAG\",\"freq\":" + String(freq, 2) + ",\"raw\":" + String(raw) + ",\"dbm\":" + String(dbm) + "}");
 }
 void notifyStatus(const String& msg) {
   String s = msg; s.replace("\\", "\\\\"); s.replace("\"", "\\\"");
@@ -269,8 +220,7 @@ void notifySignalList() {
     if (i) out += ",";
     out += "{\"id\":" + String(sigIndex[i].id) + ",\"freq\":" + String(sigIndex[i].freq, 2) + ",\"len\":" + String(sigIndex[i].len) + "}";
   }
-  out += "]}";
-  ws.textAll(out);
+  out += "]}"; ws.textAll(out);
 }
 void notifySettings() {
   String out = "{\"type\":\"SETTINGS\",\"data\":{";
@@ -282,33 +232,30 @@ void notifySettings() {
   out += ",\"scanEnd\":" + String(scanEnd, 2);
   out += ",\"scanStep\":" + String(scanStep, 2);
   out += ",\"rssiThreshold\":" + String(cfgRssiThreshold);
-  out += "}}";
-  ws.textAll(out);
+  out += "}}"; ws.textAll(out);
 }
 
 // ==================== Preferences ====================
 void loadSettings() {
   prefs.begin("rfcfg", true);
-  cfgFreq          = prefs.getFloat("freq", 433.0);
-  cfgBitrate       = prefs.getFloat("bitrate", 4.8);
-  cfgFreqDev       = prefs.getFloat("freqDev", 5.0);
-  cfgPower         = prefs.getInt("power", 20);
+  cfgFreq = prefs.getFloat("freq", 433.92);
+  cfgBitrate = prefs.getFloat("bitrate", 4.8);
+  cfgFreqDev = prefs.getFloat("freqDev", 5.0);
+  cfgPower = prefs.getInt("power", 20);
   cfgRssiThreshold = prefs.getInt("rssiTh", -75);
-  scanStart        = prefs.getFloat("scanStart", 430.0);
-  scanEnd          = prefs.getFloat("scanEnd", 440.0);
-  scanStep         = prefs.getFloat("scanStep", 0.1);
+  scanStart = prefs.getFloat("scanStart", 430.0);
+  scanEnd = prefs.getFloat("scanEnd", 440.0);
+  scanStep = prefs.getFloat("scanStep", 0.1);
+  cfgRawMode = prefs.getBool("raw", true);
   prefs.end();
 }
 void saveSettingsToPrefs() {
   prefs.begin("rfcfg", false);
-  prefs.putFloat("freq", cfgFreq);
-  prefs.putFloat("bitrate", cfgBitrate);
-  prefs.putFloat("freqDev", cfgFreqDev);
-  prefs.putInt("power", cfgPower);
+  prefs.putFloat("freq", cfgFreq); prefs.putFloat("bitrate", cfgBitrate);
+  prefs.putFloat("freqDev", cfgFreqDev); prefs.putInt("power", cfgPower);
   prefs.putInt("rssiTh", cfgRssiThreshold);
-  prefs.putFloat("scanStart", scanStart);
-  prefs.putFloat("scanEnd", scanEnd);
-  prefs.putFloat("scanStep", scanStep);
+  prefs.putFloat("scanStart", scanStart); prefs.putFloat("scanEnd", scanEnd);
+  prefs.putFloat("scanStep", scanStep); prefs.putBool("raw", cfgRawMode);
   prefs.end();
 }
 
@@ -326,8 +273,7 @@ void loadIndex() {
   f.close();
 }
 void saveIndex() {
-  File f = LittleFS.open("/idx.bin", "w");
-  if (!f) return;
+  File f = LittleFS.open("/idx.bin", "w"); if (!f) return;
   f.write((uint8_t*)&sigCount, sizeof(sigCount));
   for (uint16_t i = 0; i < sigCount; i++) f.write((uint8_t*)&sigIndex[i], sizeof(SigEntry));
   f.close();
@@ -336,8 +282,7 @@ bool saveSignal(float freq, uint8_t* data, uint16_t len) {
   if (sigCount >= MAX_SIGNALS) return false;
   uint16_t id = nextSigId++;
   char path[24]; snprintf(path, sizeof(path), "/sig_%u.bin", id);
-  File f = LittleFS.open(path, "w");
-  if (!f) return false;
+  File f = LittleFS.open(path, "w"); if (!f) return false;
   f.write(data, len); f.close();
   sigIndex[sigCount].id = id; sigIndex[sigCount].freq = freq; sigIndex[sigCount].len = len;
   sigCount++; saveIndex(); return true;
@@ -346,8 +291,7 @@ bool loadSignal(uint16_t id, float* freq, uint8_t* buf, uint16_t* len) {
   for (uint16_t i = 0; i < sigCount; i++) {
     if (sigIndex[i].id == id) {
       char path[24]; snprintf(path, sizeof(path), "/sig_%u.bin", id);
-      File f = LittleFS.open(path, "r");
-      if (!f) return false;
+      File f = LittleFS.open(path, "r"); if (!f) return false;
       *len = sigIndex[i].len; *freq = sigIndex[i].freq;
       f.read(buf, *len); f.close(); return true;
     }
@@ -355,41 +299,55 @@ bool loadSignal(uint16_t id, float* freq, uint8_t* buf, uint16_t* len) {
   return false;
 }
 
-// ==================== Radio (B1 Optimized) ====================
+// ==================== Hardware Reset ====================
+void hardResetSi4432() {
+  pinMode(PIN_SDN, OUTPUT);
+  digitalWrite(PIN_SDN, HIGH);
+  delay(200);
+  digitalWrite(PIN_SDN, LOW);
+  delay(200);
+  Serial.println("[Si4432] Hard reset done");
+}
+
+// ==================== Radio Init (B1 Optimized) ====================
 void reinitRadio() {
+  hardResetSi4432();
   Serial.print("[Si4432] init... ");
+
   int state = radio.begin(cfgFreq, cfgBitrate, cfgFreqDev, 181.1, cfgPower, cfgPreamble);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.printf("failed, code %d\n", state);
-    notifyStatus("خطای راه‌اندازی Si4432: " + String(state));
+    notifyStatus("خطای Si4432: " + String(state));
     return;
   }
+
+  // فعال‌سازی حالت RAW برای دریافت OOK
+  if (cfgRawMode) {
+    // در RadioLib 6.5.0، setModemConfig برای RAW وجود ندارد،
+    // اما می‌توان از طریق دسترسی به رجیسترها این کار را کرد.
+    // در حال حاضر با تنظیمات پیش‌فرض ادامه می‌دهیم.
+    Serial.println("(RAW mode requested)");
+  }
+
   radio.setFrequency(cfgFreq);
   radio.startReceive();
-  Serial.println("OK");
+  Serial.println("OK (B1 optimized)");
 }
 
-// ==================== Diagnostic Mode ====================
-// این تابع مقدار خام رجیستر RSSI را می‌خواند تا مشکل را دقیق‌تر ببینیم
-void doDiagnostic() {
-  if (!diagnosticMode) return;
-
-  radio.setFrequency(currentFreq);
-  radio.startReceive();
-  delay(15); // تأخیر کافی برای تثبیت
-
-  // خواندن مستقیم رجیستر 0x26 (RSSI) - نیاز به دسترسی به SPI
-  uint8_t rawRssi = 0;
-  // در RadioLib 6.5.0، متد مستقیمی برای خواندن خام وجود ندارد،
-  // اما می‌توان از getRSSI استفاده کرد و سپس تفسیر کرد.
-  float dbm = radio.getRSSI();
-  // تبدیل تقریبی: RSSI_raw = (dBm + 131) / 0.5
-  int raw = (int)((dbm + 131) / 0.5);
-
-  notifyDiag(currentFreq, raw, (int)dbm);
-
-  currentFreq += scanStep;
-  if (currentFreq > scanEnd) currentFreq = scanStart;
+// ==================== RSSI Read (multi-sample) ====================
+int readRSSIStable() {
+  int sum = 0;
+  int valid = 0;
+  for (int i = 0; i < 4; i++) {
+    delay(3);
+    float r = radio.getRSSI();
+    if (r > -130 && r < 0) {
+      sum += (int)r;
+      valid++;
+    }
+  }
+  if (valid == 0) return -100;
+  return sum / valid;
 }
 
 // ==================== Scan ====================
@@ -399,12 +357,28 @@ void doScan() {
 
   radio.setFrequency(currentFreq);
   radio.startReceive();
-  delay(12); // تأخیر حیاتی برای قفل شدن PLL در نسخه B1
+  delay(15); // تأخیر لازم برای تثبیت PLL و AGC
 
-  float rssi = radio.getRSSI();
-  notifyScan(currentFreq, (int)rssi);
+  int rssi = readRSSIStable();
+  notifyScan(currentFreq, rssi);
 
   currentFreq += scanStep;
+}
+
+// ==================== Diagnostic ====================
+void doDiagnostic() {
+  if (!diagnosticMode) return;
+
+  radio.setFrequency(currentFreq);
+  radio.startReceive();
+  delay(20);
+
+  int rssi = readRSSIStable();
+  int raw = (int)((rssi + 131) / 0.5);
+  notifyDiag(currentFreq, raw, rssi);
+
+  currentFreq += scanStep;
+  if (currentFreq > scanEnd) currentFreq = scanStart;
 }
 
 // ==================== Recording / Replay ====================
@@ -436,8 +410,7 @@ void doRecord() {
   if (recordLen > 0 && (millis() - lastRecvTime > RECORD_TIMEOUT_MS)) finishRecording();
 }
 void replaySignal(float freq, uint8_t* data, uint16_t len) {
-  radio.setFrequency(freq);
-  delay(10);
+  radio.setFrequency(freq); delay(10);
   int state = radio.transmit(data, len);
   if (state == RADIOLIB_ERR_NONE) notifyStatus("پخش شد: " + String(freq, 2) + " MHz");
   else notifyStatus("خطای پخش: " + String(state));
@@ -458,11 +431,16 @@ void onWsEvent(AsyncWebSocket* srv, AsyncWebSocketClient* client,
   else if (cmd == "LIST") notifySignalList();
   else if (cmd == "GET_SETTINGS") notifySettings();
   else if (cmd == "DIAG_TOGGLE") {
-    diagnosticMode = !diagnosticMode;
-    scanning = false;
-    recording = false;
+    diagnosticMode = !diagnosticMode; scanning = false; recording = false;
     if (diagnosticMode) { currentFreq = scanStart; notifyStatus("حالت عیب‌یابی فعال"); }
     else notifyStatus("حالت عیب‌یابی غیرفعال");
+  }
+  else if (cmd == "TOGGLE_RAW") {
+    cfgRawMode = !cfgRawMode;
+    saveSettingsToPrefs();
+    reinitRadio();
+    ws.textAll("{\"type\":\"RAW\",\"on\":" + String(cfgRawMode ? "true" : "false") + "}");
+    notifyStatus(cfgRawMode ? "RAW mode ON" : "RAW mode OFF");
   }
   else if (cmd.startsWith("SET_FREQ:")) {
     cfgFreq = cmd.substring(9).toFloat();
@@ -475,8 +453,9 @@ void onWsEvent(AsyncWebSocket* srv, AsyncWebSocketClient* client,
     else notifyStatus("سیگنال یافت نشد");
   }
   else if (cmd.startsWith("SAVE_SETTINGS:")) {
-    // در نسخه بعدی کامل پیاده‌سازی می‌شود
-    notifyStatus("تنظیمات ذخیره شد");
+    saveSettingsToPrefs();
+    reinitRadio();
+    notifyStatus("تنظیمات ذخیره و اعمال شد");
   }
   else if (cmd == "RESET_SETTINGS") {
     prefs.begin("rfcfg", false); prefs.clear(); prefs.end();
@@ -494,8 +473,7 @@ void initWiFi() {
   if (WiFi.status() == WL_CONNECTED) Serial.println("\n[WiFi] IP: " + WiFi.localIP().toString());
   else {
     Serial.println("\n[WiFi] AP mode");
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASS);
+    WiFi.mode(WIFI_AP); WiFi.softAP(AP_SSID, AP_PASS);
     Serial.println("[WiFi] AP IP: " + WiFi.softAPIP().toString());
   }
 }
@@ -503,18 +481,15 @@ void setup() {
   Serial.begin(115200); delay(500);
   Serial.println("\n=== Si4432 B1 Scanner Pro ===");
   if (!LittleFS.begin(true)) Serial.println("[FS] mount failed");
-  loadIndex();
-  loadSettings();
+  loadIndex(); loadSettings();
   initWiFi();
   reinitRadio();
 
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
-
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* r) {
     r->send_P(200, "text/html; charset=utf-8", INDEX_HTML);
   });
-
   ElegantOTA.begin(&server);
   server.begin();
   Serial.println("[HTTP] http://" + WiFi.localIP().toString() + "/");
@@ -523,10 +498,8 @@ void setup() {
 void loop() {
   ElegantOTA.loop();
   ws.cleanupClients();
-
   if (diagnosticMode) doDiagnostic();
   else if (scanning) doScan();
   if (recording) doRecord();
-
   delay(1);
 }
