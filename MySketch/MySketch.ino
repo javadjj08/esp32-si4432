@@ -331,12 +331,12 @@ void reinitRadio() {
     return;
   }
 
-  // --- تنظیم مدولاسیون با نوشتن مستقیم در رجیستر ---
+  // --- تنظیم مدولاسیون با نوشتن مستقیم در رجیستر (اصلاح‌شده) ---
   if (cfgOOKMode) {
-    radio.SPIsetRegValue(RADIOLIB_SI443X_REG_MODULATION_MODE_CONTROL_2, RADIOLIB_SI443X_MODULATION_OOK, 1, 0);
+    radio.mod->SPIsetRegValue(RADIOLIB_SI443X_REG_MODULATION_MODE_CONTROL_2, RADIOLIB_SI443X_MODULATION_OOK, 1, 0);
     Serial.println("(OOK mode enabled)");
   } else {
-    radio.SPIsetRegValue(RADIOLIB_SI443X_REG_MODULATION_MODE_CONTROL_2, RADIOLIB_SI443X_MODULATION_GFSK, 1, 0);
+    radio.mod->SPIsetRegValue(RADIOLIB_SI443X_REG_MODULATION_MODE_CONTROL_2, RADIOLIB_SI443X_MODULATION_GFSK, 1, 0);
     Serial.println("(GFSK mode enabled)");
   }
 
