@@ -2,6 +2,7 @@
  * Si4432 BPS1EZ Universal RF Remote Replay Tool
  * ESP32 DevKit V1 + Si4432
  * Library: nopnop2002/Arduino-SI4432
+ * Features: Manual Freq, Scan, Record, Replay, Settings, OOK/FSK, OTA
  */
 
 #include <Arduino.h>
@@ -17,15 +18,15 @@
 #define PIN_CS   5
 #define PIN_SDN  15
 #define PIN_IRQ  16
-#define PIN_GPIO 4
-
-Si4432 radio(PIN_CS, PIN_SDN, PIN_IRQ, PIN_GPIO);
 
 // ==================== WiFi ====================
 const char* STA_SSID = "YOUR_WIFI_SSID";
 const char* STA_PASS = "YOUR_WIFI_PASSWORD";
 const char* AP_SSID  = "RF-Scanner";
 const char* AP_PASS  = "12345678";
+
+// ==================== Si4432 ====================
+Si4432 radio(PIN_CS, PIN_SDN, PIN_IRQ);
 
 // ==================== Global Config ====================
 Preferences prefs;
@@ -302,11 +303,20 @@ void reinitRadio() {
   radio.setFrequency(cfgFreq);
   radio.setBaudRate(cfgBitrate);
   radio.setModulationType(cfgOOKMode ? Si4432::OOK : Si4432::GFSK);
-  radio.setTxPower(cfgPower);
+  radio.setTransmitPower((byte)map(cfgPower, -1, 20, 0, 7));
   radio.setPacketHandling(false);
   radio.setManchesterEncoding(false);
   radio.turnOn();
   Serial.println("OK (OOK=" + String(cfgOOKMode) + ")");
+}
+
+// ==================== Read RSSI ====================
+int readRSSI() {
+  // خواندن مستقیم رجیستر RSSI (0x26)
+  byte raw = radio.ReadRegister(Si4432::REG_RSSI);
+  // تبدیل به dBm: هر بیت 0.5 dB، مقدار خام 0..255
+  int dbm = (int)(raw * 0.5) - 131;
+  return dbm;
 }
 
 // ==================== Scan ====================
@@ -318,7 +328,7 @@ void doScan() {
   radio.turnOn();
   delay(50);
 
-  int rssi = (int)radio.getRSSI();
+  int rssi = readRSSI();
   notifyScan(currentFreq, rssi);
 
   currentFreq += scanStep;
@@ -332,8 +342,8 @@ void doDiagnostic() {
   radio.turnOn();
   delay(50);
 
-  int rssi = (int)radio.getRSSI();
-  int raw = (int)((rssi + 131) / 0.5);
+  int rssi = readRSSI();
+  byte raw = radio.ReadRegister(Si4432::REG_RSSI);
   notifyDiag(currentFreq, raw, rssi);
 
   Serial.print("[DIAG] ");
@@ -352,7 +362,7 @@ void startRecording() {
   scanning = false; recording = true; recordLen = 0;
   recordFreq = currentFreq; lastRecvTime = millis();
   radio.setFrequency(recordFreq);
-  radio.turnOn();
+  radio.startListening();
   notifyStatus("Recording @ " + String(recordFreq, 2) + " MHz");
 }
 void finishRecording() {
@@ -366,11 +376,15 @@ void finishRecording() {
 }
 void doRecord() {
   if (!recording) return;
-  uint8_t buf[64];
-  uint8_t len = radio.receive(buf, sizeof(buf));
-  if (len > 0 && (recordLen + len) <= MAX_RECORD) {
-    memcpy(recordBuf + recordLen, buf, len);
-    recordLen += len; lastRecvTime = millis();
+  if (radio.isPacketReceived()) {
+    uint8_t len = 0;
+    byte buf[64];
+    radio.getPacketReceived(&len, buf);
+    if (len > 0 && (recordLen + len) <= MAX_RECORD) {
+      memcpy(recordBuf + recordLen, buf, len);
+      recordLen += len; lastRecvTime = millis();
+    }
+    radio.startListening();
   }
   if (recordLen > 0 && (millis() - lastRecvTime > RECORD_TIMEOUT_MS)) finishRecording();
 }
@@ -380,7 +394,7 @@ void replaySignal(float freq, uint8_t* data, uint16_t len) {
   delay(10);
   radio.sendPacket((uint8_t)len, data);
   notifyStatus("پخش شد: " + String(freq, 2) + " MHz");
-  radio.turnOn();
+  radio.startListening();
 }
 
 // ==================== WebSocket ====================
