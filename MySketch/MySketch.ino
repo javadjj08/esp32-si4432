@@ -1,8 +1,8 @@
 /*
- * Si4432 BPS1EZ (Rev B1) Universal RF Tool - FINAL STANDARD VERSION
+ * Si4432 BPS1EZ (Rev B1) Universal RF Tool - FINAL COMPLETE VERSION
  * ESP32 DevKit V1 + Si4432
  * Libs: RadioLib 6.5.0, ESPAsyncWebServer, ElegantOTA
- * Features: Manual Freq, Scan, Record, Replay, Settings, RAW OOK Mode, Sync-Word RSSI
+ * Features: Manual Freq, Scan, Record, Replay, Settings, OOK Mode, AGC-aware RSSI
  */
 
 #include <Arduino.h>
@@ -40,7 +40,7 @@ int cfgRssiThreshold = -75;
 float scanStart = 430.0;
 float scanEnd   = 440.0;
 float scanStep  = 0.1;
-bool  cfgRawMode = true; // حالت RAW برای دریافت OOK
+bool  cfgOOKMode = true;   // OOK برای ریموت‌های Sub-GHz
 
 // ==================== State ====================
 bool scanning = false;
@@ -56,7 +56,6 @@ unsigned long lastRecvTime = 0;
 
 // ==================== RSSI Interrupt ====================
 volatile bool rssiReady = false;
-volatile int lastRssi = -100;
 
 // ==================== Signal Index ====================
 #define MAX_SIGNALS 16
@@ -120,7 +119,7 @@ input[type=number],input[type=text]{flex:1;background:#0a0e17;color:#0f0;border:
 <button class="btn-stop" onclick="send('STOP')">■ توقف</button>
 </div>
 <div class="btn-row">
-<button class="btn-ook" onclick="send('TOGGLE_RAW')" id="rawBtn">RAW: روشن</button>
+<button class="btn-ook" onclick="send('TOGGLE_OOK')" id="ookBtn">OOK: روشن</button>
 <button class="btn-diag" onclick="send('DIAG_TOGGLE')" id="diagBtn">🔬 عیب‌یابی</button>
 </div>
 </div>
@@ -163,7 +162,7 @@ function connectWS(){
     if(m.type==='SIGNALS')renderList(m.list);
     if(m.type==='STATUS')setStatus(m.msg);
     if(m.type==='SETTINGS')applySettings(m.data);
-    if(m.type==='RAW'){document.getElementById('rawBtn').textContent='RAW: '+(m.on?'روشن':'خاموش');}
+    if(m.type==='OOK'){document.getElementById('ookBtn').textContent='OOK: '+(m.on?'روشن':'خاموش');}
   }catch(err){console.log('bad json',e.data);}};
 }
 function send(c){if(ws&&ws.readyState===1)ws.send(c);}
@@ -252,7 +251,7 @@ void loadSettings() {
   scanStart = prefs.getFloat("scanStart", 430.0);
   scanEnd = prefs.getFloat("scanEnd", 440.0);
   scanStep = prefs.getFloat("scanStep", 0.1);
-  cfgRawMode = prefs.getBool("raw", true);
+  cfgOOKMode = prefs.getBool("ook", true);
   prefs.end();
 }
 void saveSettingsToPrefs() {
@@ -261,7 +260,7 @@ void saveSettingsToPrefs() {
   prefs.putFloat("freqDev", cfgFreqDev); prefs.putInt("power", cfgPower);
   prefs.putInt("rssiTh", cfgRssiThreshold);
   prefs.putFloat("scanStart", scanStart); prefs.putFloat("scanEnd", scanEnd);
-  prefs.putFloat("scanStep", scanStep); prefs.putBool("raw", cfgRawMode);
+  prefs.putFloat("scanStep", scanStep); prefs.putBool("ook", cfgOOKMode);
   prefs.end();
 }
 
@@ -320,7 +319,7 @@ void IRAM_ATTR onRadioInterrupt() {
   rssiReady = true;
 }
 
-// ==================== Radio Init (B1 Optimized) ====================
+// ==================== Radio Init (B1 Optimized for OOK) ====================
 void reinitRadio() {
   hardResetSi4432();
   Serial.print("[Si4432] init... ");
@@ -332,29 +331,32 @@ void reinitRadio() {
     return;
   }
 
-  if (cfgRawMode) {
-    // حالت RAW برای دریافت OOK
-    radio.setSyncWord(0x00, 0x00);
-    radio.setAGC(false);
-    Serial.println("(RAW mode for OOK)");
+  // فعال‌سازی OOK برای ریموت‌های Sub-GHz
+  if (cfgOOKMode) {
+    radio.setOOK(true);
+    Serial.println("(OOK mode enabled)");
   }
 
   radio.setFrequency(cfgFreq);
   pinMode(PIN_IRQ, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(PIN_IRQ), onRadioInterrupt, FALLING);
   radio.startReceive();
-  Serial.println("OK (B1 standard)");
+  Serial.println("OK (B1 OOK mode)");
 }
 
-// ==================== RSSI Read (Interrupt-based) ====================
+// ==================== RSSI Read (AGC settle aware) ====================
 int readRSSIStable() {
-  if (rssiReady) {
-    rssiReady = false;
-    lastRssi = (int)radio.getRSSI();
-    return lastRssi;
-  }
-  // اگر وقفه رخ نداده باشد، مقدار ضعیف برگردان
-  return -100;
+  // چند بار پشت سر هم بخوان و پایدارترین مقدار را برگردان
+  int r1 = (int)radio.getRSSI();
+  delay(5);
+  int r2 = (int)radio.getRSSI();
+  delay(5);
+  int r3 = (int)radio.getRSSI();
+  // میانگین
+  int avg = (r1 + r2 + r3) / 3;
+  // اگر مقدار غیرمعتبر بود، ضعیف برگردان
+  if (avg > 0) avg = -100;
+  return avg;
 }
 
 // ==================== Scan ====================
@@ -364,7 +366,9 @@ void doScan() {
 
   radio.setFrequency(currentFreq);
   radio.startReceive();
-  delay(15);
+
+  // مهم: AGC به زمان نیاز دارد تا settle کند
+  delay(50);
 
   int rssi = readRSSIStable();
   notifyScan(currentFreq, rssi);
@@ -378,11 +382,18 @@ void doDiagnostic() {
 
   radio.setFrequency(currentFreq);
   radio.startReceive();
-  delay(20);
+  delay(50);
 
   int rssi = readRSSIStable();
   int raw = (int)((rssi + 131) / 0.5);
   notifyDiag(currentFreq, raw, rssi);
+
+  Serial.print("[DIAG] ");
+  Serial.print(currentFreq, 2);
+  Serial.print(" MHz | RAW=");
+  Serial.print(raw);
+  Serial.print(" | dBm=");
+  Serial.println(rssi);
 
   currentFreq += scanStep;
   if (currentFreq > scanEnd) currentFreq = scanStart;
@@ -442,12 +453,12 @@ void onWsEvent(AsyncWebSocket* srv, AsyncWebSocketClient* client,
     if (diagnosticMode) { currentFreq = scanStart; notifyStatus("حالت عیب‌یابی فعال"); }
     else notifyStatus("حالت عیب‌یابی غیرفعال");
   }
-  else if (cmd == "TOGGLE_RAW") {
-    cfgRawMode = !cfgRawMode;
+  else if (cmd == "TOGGLE_OOK") {
+    cfgOOKMode = !cfgOOKMode;
     saveSettingsToPrefs();
     reinitRadio();
-    ws.textAll("{\"type\":\"RAW\",\"on\":" + String(cfgRawMode ? "true" : "false") + "}");
-    notifyStatus(cfgRawMode ? "RAW mode ON (OOK)" : "RAW mode OFF (FSK)");
+    ws.textAll("{\"type\":\"OOK\",\"on\":" + String(cfgOOKMode ? "true" : "false") + "}");
+    notifyStatus(cfgOOKMode ? "OOK mode ON" : "FSK mode ON");
   }
   else if (cmd.startsWith("SET_FREQ:")) {
     cfgFreq = cmd.substring(9).toFloat();
