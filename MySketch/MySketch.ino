@@ -1,7 +1,7 @@
 /*
  * Si4432 BPS1EZ Universal RF Remote Replay Tool
  * ESP32 DevKit V1 + Si4432
- * Library: RadioLib 7.8.0 (OOK + FSK support)
+ * Library: RadioLib 7.8.0
  * Features: Manual Freq, Scan, Record, Replay, Settings, OOK/FSK, OTA
  */
 
@@ -301,10 +301,13 @@ void reinitRadio() {
     notifyStatus("خطای Si4432: " + String(state));
     return;
   }
+  // تنظیم مدولاسیون OOK با نوشتن مستقیم در رجیستر 0x71
   if (cfgOOKMode) {
-    radio.setOOK(true);
+    radio.mod->SPIsetRegValue(RADIOLIB_SI443X_REG_MODULATION_MODE_CONTROL_2,
+                              RADIOLIB_SI443X_MODULATION_OOK, 1, 0);
   } else {
-    radio.setOOK(false);
+    radio.mod->SPIsetRegValue(RADIOLIB_SI443X_REG_MODULATION_MODE_CONTROL_2,
+                              RADIOLIB_SI443X_MODULATION_GFSK, 1, 0);
   }
   radio.setFrequency(cfgFreq);
   radio.startReceive();
@@ -379,12 +382,10 @@ void doRecord() {
 }
 void replaySignal(float freq, uint8_t* data, uint16_t len) {
   radio.setFrequency(freq);
-  radio.startTransmit();
-  delay(10);
   int state = radio.transmit(data, len);
   if (state == RADIOLIB_ERR_NONE) notifyStatus("پخش شد: " + String(freq, 2) + " MHz");
   else notifyStatus("خطای پخش: " + String(state));
-  delay(20); radio.startReceive();
+  radio.startReceive();
 }
 
 // ==================== WebSocket ====================
