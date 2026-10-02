@@ -1,8 +1,7 @@
 /*
- * Si4432 BPS1EZ Universal RF Remote Replay Tool - FINAL VERSION
+ * Si4432 Pro - Flipper Zero Style UI
  * ESP32 DevKit V1 + Si4432
  * Library: nopnop2002/Arduino-SI4432
- * Features: Scan, Record (RSSI envelope), Replay, Threshold, Bitrate presets, OOK/FSK
  */
 
 #include <Arduino.h>
@@ -14,617 +13,813 @@
 #include <ESPAsyncWebServer.h>
 #include <ElegantOTA.h>
 
-// ==================== Pin Definitions ====================
+// ==================== Pins ====================
 #define PIN_CS   5
 #define PIN_SDN  15
 #define PIN_IRQ  16
 
 // ==================== WiFi ====================
-const char* STA_SSID = "YOUR_WIFI_SSID";
-const char* STA_PASS = "YOUR_WIFI_PASSWORD";
-const char* AP_SSID  = "RF-Scanner";
-const char* AP_PASS  = "12345678";
+const char* AP_SSID = "RF-Recorder";
+const char* AP_PASS = "12345678";
 
-// ==================== Si4432 ====================
+// ==================== Radio ====================
 Si4432 radio(PIN_CS, PIN_SDN, PIN_IRQ);
 
-// ==================== Global Config ====================
 Preferences prefs;
 float cfgFreq = 433.92;
 float cfgBitrate = 4.8;
-int8_t cfgPower = 20;
-int cfgRssiThreshold = -85;
+int   cfgPower = 20;
+int   cfgThreshold = -85;
 float scanStart = 430.0;
 float scanEnd   = 440.0;
 float scanStep  = 0.1;
-bool  cfgOOKMode = true;
+bool  cfgOOK = true;
 
 // ==================== State ====================
 bool scanning = false;
-bool recording = false;
 bool diagnosticMode = false;
+int  recState = 0;
 float currentFreq = 430.0;
-float recordFreq = 0;
-#define MAX_RECORD 1024
-uint8_t  recordBuf[MAX_RECORD];
-uint16_t recordLen = 0;
-unsigned long lastRecvTime = 0;
-#define RECORD_TIMEOUT_MS 400
+float recFreq = 0;
+uint8_t  recBuf[2048];
+uint16_t recLen = 0;
+uint8_t  recBit = 0;
+uint8_t  recBitCnt = 0;
+unsigned long recStartMs = 0;
+unsigned long recLastMs = 0;
+char     recName[32] = "";
 
-// ==================== Recording Sampling ====================
-#define SAMPLE_INTERVAL_US  200
-uint8_t  recordBitBuf = 0;
-uint8_t  recordBitCount = 0;
-unsigned long lastSampleUs = 0;
+#define REC_TIMEOUT_MS 300
+#define REC_START_TIMEOUT_MS 5000
 
-// ==================== Signal Index ====================
-#define MAX_SIGNALS 16
-struct SigEntry { uint16_t id; float freq; uint16_t len; uint8_t bitrate; };
-SigEntry sigIndex[MAX_SIGNALS];
-uint16_t sigCount = 0;
-uint16_t nextSigId = 1;
+// ==================== Signals ====================
+#define MAX_SIGNALS 32
+#define NAME_LEN    32
+struct Signal {
+  uint16_t id;
+  float    freq;
+  uint16_t len;
+  char     name[NAME_LEN];
+};
+Signal signals[MAX_SIGNALS];
+int signalCount = 0;
+int nextId = 1;
 
 // ==================== Web ====================
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
-// ==================== HTML UI ====================
-const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
+// ==================== HTML (Flipper Zero style) ====================
+const char HTML[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="fa" dir="rtl"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>Si4432 Pro</title><style>
-*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-body{font-family:Tahoma,sans-serif;background:#0a0e17;color:#e0e6ed;padding:10px;max-width:520px;margin:auto}
-h1{font-size:1em;text-align:center;color:#00e5ff;margin-bottom:10px}
-.card{background:#151c2c;border-radius:10px;padding:12px;margin-bottom:8px;border:1px solid #1e2a45}
-.big{font-size:2.2em;font-weight:700;color:#00e5ff;font-family:monospace;text-align:center;display:block}
-.unit{text-align:center;color:#7a8ba8;font-size:.85em}
-.rssi-bar{height:8px;background:#1e2a45;border-radius:4px;margin-top:8px;overflow:hidden}
-.rssi-fill{height:100%;width:0;background:#00e5ff;transition:width .1s}
-.status{text-align:center;font-size:.8em;color:#7a8ba8;margin-top:6px}
-.btn-row{display:flex;gap:6px;margin-top:4px}
-button{flex:1;padding:12px 8px;border:none;border-radius:8px;font-size:.9em;font-weight:600;cursor:pointer;touch-action:manipulation}
-.btn-scan{background:#00e5ff;color:#0a0e17}.btn-record{background:#ff3d71;color:#fff}
-.btn-stop{background:#2d3a54;color:#e0e6ed}
-.btn-replay{background:#00b894;color:#fff;padding:8px 12px;font-size:.85em;flex:0 0 auto}
-.btn-del{background:#c0392b;color:#fff;padding:8px 10px;font-size:.85em;flex:0 0 auto;margin-right:4px}
-.btn-diag{background:#6c5ce7;color:#fff}.btn-ook{background:#f9a825;color:#000}
-.btn-preset{background:#34495e;color:#fff;padding:6px 4px;font-size:.75em;margin:0 2px}
-.btn-preset.active{background:#00e5ff;color:#0a0e17}
-.signal-item{padding:10px 4px;border-bottom:1px solid #1e2a45;font-size:.85em}
-.signal-item:last-child{border-bottom:none}
-.sig-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
-.sig-info{color:#7a8ba8;font-size:.75em}
-.sig-actions{display:flex;gap:4px}
-.empty{color:#3a4a66;text-align:center;padding:14px}
-.tabs{display:flex;gap:4px;margin-bottom:8px}
-.tab{flex:1;padding:10px;text-align:center;background:#1e2a45;border-radius:6px;cursor:pointer;font-size:.85em}
-.tab.active{background:#00e5ff;color:#0a0e17;font-weight:bold}
-.tab-content{display:none}.tab-content.active{display:block}
-.row{display:flex;gap:6px;margin-bottom:6px;align-items:center}
+<title>Si4432 Pro</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;user-select:none}
+body{font-family:Tahoma,sans-serif;background:#0a0e17;color:#e0e6ed;
+     max-width:520px;margin:auto;min-height:100vh;display:flex;flex-direction:column}
+
+/* === Status Bar === */
+#statusbar{background:#0d1420;padding:8px 12px;display:flex;justify-content:space-between;
+  align-items:center;border-bottom:1px solid #1e2a45;font-family:monospace;font-size:.8em;
+  min-height:40px;position:sticky;top:0;z-index:10}
+#sbFreq{color:#00e5ff;font-weight:bold}
+#sbRssi{color:#f9a825}
+#sbState{color:#8899aa}
+
+/* === Screen Container === */
+.screen{display:none;padding:12px;flex:1;overflow-y:auto}
+.screen.active{display:block}
+
+/* === Header with Back === */
+.header{display:flex;align-items:center;gap:10px;margin-bottom:12px;
+  padding-bottom:8px;border-bottom:1px solid #1e2a45}
+.back{background:transparent;color:#00e5ff;border:none;font-size:1.4em;
+  cursor:pointer;padding:4px 12px;flex:0 0 auto}
+.title{font-size:1.05em;font-weight:bold;color:#e0e6ed}
+
+/* === Menu Grid (Flipper style) === */
+.menu{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:8px 0}
+.menu-item{background:#151c2c;border:1px solid #1e2a45;border-radius:12px;
+  padding:22px 10px;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:10px;cursor:pointer;transition:all .15s;
+  touch-action:manipulation;min-height:120px}
+.menu-item:active{transform:scale(.96);background:#1e2a45}
+.menu-icon{font-size:2.4em;line-height:1}
+.menu-label{font-size:.85em;color:#e0e6ed;text-align:center;font-weight:600}
+.menu-sub{font-size:.7em;color:#7a8ba8;text-align:center;margin-top:2px}
+
+/* === Cards === */
+.card{background:#151c2c;border-radius:10px;padding:12px;margin-bottom:10px;
+  border:1px solid #1e2a45}
+.row{display:flex;gap:6px;margin-bottom:8px;align-items:center}
 .label{color:#7a8ba8;font-size:.8em;min-width:65px}
-input[type=number],input[type=text]{flex:1;background:#0a0e17;color:#0f0;border:1px solid #1e2a45;border-radius:6px;padding:8px;font-family:monospace;font-size:.9em}
-.threshold-row{display:flex;gap:8px;align-items:center;margin-top:6px}
-.threshold-row input[type=range]{flex:1}
+input[type=number],input[type=text]{flex:1;background:#0a0e17;color:#0f0;
+  border:1px solid #1e2a45;border-radius:6px;padding:10px;font-family:monospace;
+  font-size:.9em;color-scheme:dark}
+input:focus{outline:none;border-color:#00e5ff}
+
+/* === Buttons === */
+.btn{padding:12px;border:none;border-radius:8px;font-size:.9em;font-weight:600;
+  cursor:pointer;touch-action:manipulation;font-family:inherit}
+.btn:active{transform:scale(.97)}
+.btn-primary{background:#00e5ff;color:#0a0e17;width:100%}
+.btn-danger{background:#ff3d71;color:#fff;flex:1}
+.btn-stop{background:#2d3a54;color:#e0e6ed;flex:1}
+.btn-green{background:#00b894;color:#fff}
+.btn-ook{background:#f9a825;color:#000;flex:1}
+.btn-diag{background:#6c5ce7;color:#fff;flex:1}
+.btn-sm{padding:8px 12px;font-size:.8em}
+.btn-preset{background:#34495e;color:#fff;padding:10px 4px;font-size:.8em;flex:1;margin:0 2px}
+.btn-preset.active{background:#00e5ff;color:#0a0e17}
+.btn-row{display:flex;gap:6px;margin-top:6px}
+
+/* === Big display === */
+.display{background:#0a0e17;border-radius:10px;padding:20px;text-align:center;
+  margin-bottom:10px;border:1px solid #1e2a45}
+.display .value{font-size:2.4em;font-weight:700;color:#00e5ff;
+  font-family:monospace;display:block;line-height:1.1}
+.display .unit{color:#7a8ba8;font-size:.9em;margin-top:4px}
+.rssi-bar{height:8px;background:#1e2a45;border-radius:4px;margin-top:12px;overflow:hidden}
+.rssi-fill{height:100%;width:0;background:#00e5ff;transition:width .15s}
+.hint{text-align:center;color:#8899aa;font-size:.8em;margin-top:8px;font-family:monospace}
+
+/* === Signal List === */
+.sig{background:#0a0e17;padding:12px;border-radius:8px;margin-bottom:8px;
+  border:1px solid #1e2a45}
+.sig-head{display:flex;justify-content:space-between;align-items:flex-start}
+.sig-name{color:#00e5ff;font-weight:bold;font-size:.95em;word-break:break-word}
+.sig-meta{color:#8899aa;font-size:.75em;font-family:monospace;margin-top:4px}
+.sig-actions{display:flex;gap:4px;flex:0 0 auto}
+.empty{color:#3a4a66;text-align:center;padding:30px 10px;font-size:.85em}
+
+/* === Slider === */
+.slider-row{display:flex;gap:10px;align-items:center}
+input[type=range]{flex:1;height:8px;-webkit-appearance:none;background:#1e2a45;
+  border-radius:4px;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;
+  border-radius:50%;background:#00e5ff;cursor:pointer}
+.th-val{min-width:55px;text-align:center;color:#00e5ff;font-family:monospace;
+  font-weight:bold;font-size:1em}
+
+/* === Recording overlay === */
+.rec-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(10,14,23,.95);
+  display:none;flex-direction:column;align-items:center;justify-content:center;
+  padding:20px;z-index:100}
+.rec-overlay.active{display:flex}
+.rec-pulse{width:80px;height:80px;background:#ff3d71;border-radius:50%;
+  animation:pulse 1.2s infinite;margin-bottom:20px}
+@keyframes pulse{0%{transform:scale(1);opacity:1}50%{transform:scale(1.15);opacity:.6}100%{transform:scale(1);opacity:1}}
+.rec-rssi{font-size:2em;color:#00e5ff;font-family:monospace;font-weight:bold}
+.rec-status{color:#e0e6ed;margin-top:12px;font-size:1em;text-align:center}
+.rec-cancel{margin-top:24px;background:#2d3a54;color:#fff;padding:12px 40px;
+  border:none;border-radius:8px;font-size:1em;font-family:inherit}
 </style></head><body>
-<h1>📡 Si4432 Scanner Pro</h1>
-<div class="tabs">
-<div class="tab active" onclick="switchTab('scan')">اسکن</div>
-<div class="tab" onclick="switchTab('settings')">تنظیمات</div>
+
+<!-- === Status Bar === -->
+<div id="statusbar">
+  <span id="sbFreq">433.92 MHz</span>
+  <span id="sbRssi">-- dBm</span>
+  <span id="sbState">● idle</span>
 </div>
 
-<div id="tab-scan" class="tab-content active">
-<div class="card">
-<span class="big" id="freq">---.--</span><div class="unit">MHz</div>
-<div class="rssi-bar"><div class="rssi-fill" id="rssiBar"></div></div>
-<div class="status" id="rssiTxt">RSSI: --- dBm</div>
-<div class="status" id="statusTxt">آماده</div>
+<!-- === HOME SCREEN === -->
+<div id="sc-home" class="screen active">
+  <div class="header">
+    <div class="title">📡 Si4432 Pro</div>
+  </div>
+  <div class="menu">
+    <div class="menu-item" onclick="go('read')">
+      <span class="menu-icon">📻</span>
+      <span class="menu-label">Read</span>
+      <span class="menu-sub">ضبط سیگنال جدید</span>
+    </div>
+    <div class="menu-item" onclick="go('saved')">
+      <span class="menu-icon">📼</span>
+      <span class="menu-label">Saved</span>
+      <span class="menu-sub">سیگنال‌های ذخیره‌شده</span>
+    </div>
+    <div class="menu-item" onclick="go('analyzer')">
+      <span class="menu-icon">🔍</span>
+      <span class="menu-label">Analyzer</span>
+      <span class="menu-sub">تحلیلگر فرکانس</span>
+    </div>
+    <div class="menu-item" onclick="go('settings')">
+      <span class="menu-icon">⚙️</span>
+      <span class="menu-label">Settings</span>
+      <span class="menu-sub">تنظیمات ماژول</span>
+    </div>
+  </div>
 </div>
 
-<div class="card">
-<div class="threshold-row">
-<span class="label" style="min-width:auto">آستانه:</span>
-<input type="range" id="thSlider" min="-110" max="-40" value="-85" oninput="updateTh(this.value)">
-<span id="thVal" style="min-width:50px;text-align:center;color:#00e5ff;font-family:monospace">-85</span>
-</div>
-</div>
-
-<div class="card">
-<div class="row"><span class="label">فرکانس</span>
-<input type="number" id="manualFreq" step="0.1" value="433.92" min="240" max="930">
-<button class="btn-scan" onclick="setManualFreq()">تنظیم</button></div>
-<div class="row"><span class="label">بیت‌ریت</span>
-<button class="btn-preset" id="br24" onclick="setBitrate(2.4)">2.4</button>
-<button class="btn-preset" id="br48" onclick="setBitrate(4.8)">4.8</button>
-<button class="btn-preset" id="br96" onclick="setBitrate(9.6)">9.6</button>
-</div>
-<div class="btn-row">
-<button class="btn-scan" onclick="send('SCAN')">▶ اسکن</button>
-<button class="btn-record" onclick="send('RECORD')">● ضبط</button>
-<button class="btn-stop" onclick="send('STOP')">■ توقف</button>
-</div>
-<div class="btn-row">
-<button class="btn-ook" onclick="send('TOGGLE_OOK')" id="ookBtn">OOK: روشن</button>
-<button class="btn-diag" onclick="send('DIAG_TOGGLE')" id="diagBtn">🔬 عیب‌یابی</button>
-</div>
+<!-- === READ SCREEN === -->
+<div id="sc-read" class="screen">
+  <div class="header">
+    <button class="back" onclick="go('home')">←</button>
+    <div class="title">📻 Read</div>
+  </div>
+  <div class="card">
+    <div class="row"><span class="label">اسم</span>
+      <input type="text" id="recName" placeholder="مثلاً درب پارکینگ" maxlength="30"></div>
+    <div class="row"><span class="label">فرکانس</span>
+      <input type="number" id="recFreq" step="0.01" value="433.92" min="240" max="930"></div>
+    <div class="row"><span class="label">بیت‌ریت</span>
+      <button class="btn-preset" id="rbr24" onclick="setBitrate(2.4)">2.4</button>
+      <button class="btn-preset active" id="rbr48" onclick="setBitrate(4.8)">4.8</button>
+      <button class="btn-preset" id="rbr96" onclick="setBitrate(9.6)">9.6</button>
+    </div>
+    <div class="row"><span class="label">آستانه</span>
+      <input type="range" id="recTh" min="-110" max="-40" value="-85"
+             oninput="document.getElementById('recThV').textContent=this.value">
+      <span class="th-val" id="recThV">-85</span>
+    </div>
+    <button class="btn btn-primary" style="margin-top:10px" onclick="beginRecord()">🔴 شروع ضبط</button>
+    <div class="hint">در فاصله ۲-۳ سانتی‌متر از آنتن، ریموت را ۳ بار فشار بده</div>
+  </div>
 </div>
 
-<div class="card">
-<div style="color:#7a8ba8;font-size:.85em;margin-bottom:6px">📼 سیگنال‌های ضبط شده</div>
-<div id="list"><div class="empty">خالی</div></div>
-</div>
+<!-- === SAVED SCREEN === -->
+<div id="sc-saved" class="screen">
+  <div class="header">
+    <button class="back" onclick="go('home')">←</button>
+    <div class="title">📼 Saved</div>
+    <button class="btn btn-stop btn-sm" style="margin-right:auto;flex:0 0 auto"
+            onclick="clearAll()">🗑 همه</button>
+  </div>
+  <div id="savedList"><div class="empty">خالی — ابتدا از Read استفاده کن</div></div>
 </div>
 
-<div id="tab-settings" class="tab-content">
-<div class="card"><h3 style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📻 پارامترها</h3>
-<div class="row"><span class="label">فرکانس</span><input type="number" id="setFreq" step="0.1" value="433.92"></div>
-<div class="row"><span class="label">بیت‌ریت</span><input type="number" id="setBitrate" step="0.1" value="4.8"></div>
-<div class="row"><span class="label">توان</span><input type="number" id="setPower" step="3" value="20" min="-1" max="20"></div>
-<div class="row"><span class="label">آستانه</span><input type="number" id="setRssiTh" value="-85"></div>
+<!-- === ANALYZER SCREEN === -->
+<div id="sc-analyzer" class="screen">
+  <div class="header">
+    <button class="back" onclick="go('home')">←</button>
+    <div class="title">🔍 Analyzer</div>
+  </div>
+  <div class="display">
+    <span class="value" id="anFreq">---.--</span>
+    <div class="unit">MHz</div>
+    <div class="rssi-bar"><div class="rssi-fill" id="anBar"></div></div>
+    <div class="hint" id="anRssi">RSSI: --- dBm</div>
+  </div>
+  <div class="card">
+    <div class="row"><span class="label">شروع</span>
+      <input type="number" id="anStart" step="0.1" value="430.0"></div>
+    <div class="row"><span class="label">پایان</span>
+      <input type="number" id="anEnd" step="0.1" value="440.0"></div>
+    <div class="row"><span class="label">گام</span>
+      <input type="number" id="anStep" step="0.05" value="0.1"></div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="anBtn" onclick="toggleScan()">▶ شروع اسکن</button>
+    </div>
+    <button class="btn btn-diag" style="width:100%;margin-top:6px"
+            id="diagBtn" onclick="toggleDiag()">🔬 عیب‌یابی</button>
+  </div>
+  <div class="card">
+    <div class="row"><span class="label">هدف</span>
+      <input type="number" id="anTarget" step="0.01" value="433.92"></div>
+    <button class="btn btn-green" style="width:100%"
+            onclick="setTargetFreq()">📌 رفتن به این فرکانس</button>
+  </div>
 </div>
-<div class="card"><h3 style="color:#00e5ff;font-size:.9em;margin-bottom:8px">🔍 محدوده اسکن</h3>
-<div class="row"><span class="label">شروع</span><input type="number" id="setScanStart" step="0.1" value="430.0"></div>
-<div class="row"><span class="label">پایان</span><input type="number" id="setScanEnd" step="0.1" value="440.0"></div>
-<div class="row"><span class="label">گام</span><input type="number" id="setScanStep" step="0.05" value="0.1"></div>
+
+<!-- === SETTINGS SCREEN === -->
+<div id="sc-settings" class="screen">
+  <div class="header">
+    <button class="back" onclick="go('home')">←</button>
+    <div class="title">⚙️ Settings</div>
+  </div>
+  <div class="card">
+    <div class="row"><span class="label">فرکانس</span>
+      <input type="number" id="setFreq" step="0.01" value="433.92"></div>
+    <div class="row"><span class="label">بیت‌ریت</span>
+      <input type="number" id="setBitrate" step="0.1" value="4.8"></div>
+    <div class="row"><span class="label">توان</span>
+      <input type="number" id="setPower" step="1" value="20" min="-1" max="20"></div>
+    <div class="row"><span class="label">آستانه</span>
+      <input type="number" id="setTh" value="-85"></div>
+    <div class="row"><span class="label">OOK</span>
+      <button class="btn btn-ook" id="setOok" onclick="toggleOOK()">OOK: روشن</button>
+    </div>
+  </div>
+  <button class="btn btn-primary" onclick="saveSettings()">💾 ذخیره تنظیمات</button>
+  <button class="btn btn-stop" style="width:100%;margin-top:8px"
+          onclick="resetSettings()">↺ بازگشت به پیش‌فرض</button>
 </div>
-<div class="card">
-<button class="btn-scan" onclick="saveSettings()">💾 ذخیره تنظیمات</button>
-<button class="btn-stop" onclick="resetSettings()">↺ بازگشت به پیش‌فرض</button>
-<button class="btn-stop" onclick="clearAllSignals()" style="margin-top:6px">🗑 پاک کردن همه سیگنال‌ها</button>
-</div>
+
+<!-- === RECORDING OVERLAY === -->
+<div class="rec-overlay" id="recOverlay">
+  <div class="rec-pulse"></div>
+  <div class="rec-rssi" id="recLiveRssi">--- dBm</div>
+  <div class="rec-status" id="recStatus">آماده ضبط — ریموت را فشار بده</div>
+  <button class="rec-cancel" onclick="cancelRecord()">لغو</button>
 </div>
 
 <script>
 let ws;
-function connectWS(){
+let currentScreen='home';
+
+function connect(){
   ws=new WebSocket('ws://'+location.host+'/ws');
-  ws.onopen=()=>{setStatus('متصل');send('LIST');loadSettings();};
-  ws.onclose=()=>{setStatus('قطع — تلاش مجدد');setTimeout(connectWS,2000);};
-  ws.onmessage=(e)=>{try{const m=JSON.parse(e.data);
-    if(m.type==='SCAN'){document.getElementById('freq').textContent=m.freq.toFixed(2);
-      const pct=Math.max(0,Math.min(100,(m.rssi+110)*1.4));
-      const bar=document.getElementById('rssiBar');bar.style.width=pct+'%';
-      bar.style.background=m.rssi>-70?'#00e5ff':m.rssi>-85?'#f9a825':'#ff3d71';
-      document.getElementById('rssiTxt').textContent='RSSI: '+m.rssi+' dBm';}
-    if(m.type==='DIAG'){document.getElementById('freq').textContent=m.freq.toFixed(2);
-      document.getElementById('rssiTxt').textContent='RAW: '+m.raw+' | dBm: '+m.dbm;}
-    if(m.type==='SIGNALS')renderList(m.list);
-    if(m.type==='STATUS')setStatus(m.msg);
-    if(m.type==='SETTINGS')applySettings(m.data);
-    if(m.type==='OOK'){document.getElementById('ookBtn').textContent='OOK: '+(m.on?'روشن':'خاموش');}
-    if(m.type==='BITRATE'){setBitrateUI(m.value);}
-  }catch(err){console.log('bad json',e.data);}};
+  ws.onopen=()=>{ send('LIST'); send('GET_SETTINGS'); };
+  ws.onclose=()=>{ setSbState('قطع'); setTimeout(connect,2000); };
+  ws.onmessage=(e)=>{
+    try{ const m=JSON.parse(e.data);
+      if(m.type==='SCAN'){
+        document.getElementById('anFreq').textContent=m.freq.toFixed(2);
+        const pct=Math.max(0,Math.min(100,(m.rssi+110)*1.4));
+        const bar=document.getElementById('anBar');bar.style.width=pct+'%';
+        bar.style.background=m.rssi>-70?'#00e5ff':m.rssi>-85?'#f9a825':'#ff3d71';
+        document.getElementById('anRssi').textContent='RSSI: '+m.rssi+' dBm';
+        setSbFreq(m.freq); setSbRssi(m.rssi);
+      }
+      if(m.type==='DIAG'){
+        document.getElementById('anFreq').textContent=m.freq.toFixed(2);
+        document.getElementById('anRssi').textContent='RAW: '+m.raw+' | dBm: '+m.dbm;
+        setSbFreq(m.freq); setSbRssi(m.dbm);
+      }
+      if(m.type==='SIGNALS') renderList(m.list);
+      if(m.type==='STATUS') setSbState(m.msg);
+      if(m.type==='SETTINGS') applySettings(m.data);
+      if(m.type==='OOK') setOokUI(m.on);
+      if(m.type==='BITRATE') setBitrateUI(m.value);
+      if(m.type==='LIVE'){
+        document.getElementById('recLiveRssi').textContent=m.rssi+' dBm';
+        document.getElementById('recStatus').textContent=m.state;
+        setSbRssi(m.rssi);
+      }
+    }catch(x){}
+  };
 }
 function send(c){if(ws&&ws.readyState===1)ws.send(c);}
-function switchTab(n){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
-  document.querySelector('.tab[onclick*="'+n+'"]').classList.add('active');
-  document.getElementById('tab-'+n).classList.add('active');}
-function setManualFreq(){const f=parseFloat(document.getElementById('manualFreq').value);
-  if(f>=240&&f<=930)send('SET_FREQ:'+f);}
-function setBitrate(br){send('SET_BITRATE:'+br);}
+
+function go(screen){
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById('sc-'+screen).classList.add('active');
+  currentScreen=screen;
+  if(screen==='saved') send('LIST');
+  if(screen==='settings') send('GET_SETTINGS');
+  if(screen!=='analyzer'){ /* keep scan running if on analyzer */ }
+}
+
+// === Status bar ===
+function setSbFreq(f){document.getElementById('sbFreq').textContent=(+f).toFixed(2)+' MHz';}
+function setSbRssi(r){document.getElementById('sbRssi').textContent=r+' dBm';}
+function setSbState(s){document.getElementById('sbState').textContent='● '+s;}
+
+// === Bitrate ===
+function setBitrate(br){ send('SET_BITRATE:'+br); }
 function setBitrateUI(br){
-  document.getElementById('br24').classList.remove('active');
-  document.getElementById('br48').classList.remove('active');
-  document.getElementById('br96').classList.remove('active');
-  if(br==2.4)document.getElementById('br24').classList.add('active');
-  else if(br==4.8)document.getElementById('br48').classList.add('active');
-  else if(br==9.6)document.getElementById('br96').classList.add('active');
+  ['rbr24','rbr48','rbr96'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.classList.remove('active');
+  });
+  if(br==2.4){const e=document.getElementById('rbr24'); if(e)e.classList.add('active');}
+  else if(br==4.8){const e=document.getElementById('rbr48'); if(e)e.classList.add('active');}
+  else if(br==9.6){const e=document.getElementById('rbr96'); if(e)e.classList.add('active');}
 }
-function updateTh(v){
-  document.getElementById('thVal').textContent=v;
-  send('THRESH:'+v);
+
+// === OOK ===
+function toggleOOK(){ send('TOGGLE_OOK'); }
+function setOokUI(on){
+  const b=document.getElementById('setOok');
+  if(b) b.textContent='OOK: '+(on?'روشن':'خاموش');
 }
-function renderList(list){const el=document.getElementById('list');
-  if(!list||!list.length){el.innerHTML='<div class="empty">خالی</div>';return;}
+
+// === Recording ===
+function beginRecord(){
+  const n=(document.getElementById('recName').value||'').trim()||('sig_'+Date.now());
+  const f=parseFloat(document.getElementById('recFreq').value||'433.92');
+  const th=parseInt(document.getElementById('recTh').value);
+  if(f<240||f>930){ alert('فرکانس نامعتبر'); return; }
+  send('THRESH:'+th);
+  send('REC:'+f+':'+n);
+  document.getElementById('recOverlay').classList.add('active');
+  document.getElementById('recLiveRssi').textContent='--- dBm';
+  document.getElementById('recStatus').textContent='آماده ضبط — ریموت را فشار بده';
+}
+function cancelRecord(){
+  send('STOP');
+  document.getElementById('recOverlay').classList.remove('active');
+}
+
+// === Scan ===
+let scanning=false;
+function toggleScan(){
+  scanning=!scanning;
+  const b=document.getElementById('anBtn');
+  if(scanning){ send('SCAN'); b.textContent='⏹ توقف'; }
+  else { send('STOP'); b.textContent='▶ شروع اسکن'; }
+}
+let diagOn=false;
+function toggleDiag(){
+  diagOn=!diagOn;
+  send('DIAG_TOGGLE');
+  const b=document.getElementById('diagBtn');
+  b.textContent=diagOn?'🔬 خاموش کردن':'🔬 عیب‌یابی';
+}
+function setTargetFreq(){
+  const f=parseFloat(document.getElementById('anTarget').value);
+  if(f>=240&&f<=930) send('SET_FREQ:'+f);
+}
+
+// === Saved list ===
+function renderList(list){
+  const el=document.getElementById('savedList');
+  if(!list||!list.length){ el.innerHTML='<div class="empty">خالی — ابتدا از Read استفاده کن</div>'; return; }
   el.innerHTML=list.map(s=>
-    '<div class="signal-item">'+
-    '<div class="sig-head"><div><div style="color:#00e5ff;font-family:monospace">'+s.freq.toFixed(2)+' MHz</div>'+
-    '<div class="sig-info">'+s.len+' بایت • '+s.bitrate+' kbps</div></div>'+
+    '<div class="sig"><div class="sig-head"><div style="flex:1">'+
+    '<div class="sig-name">'+s.name+'</div>'+
+    '<div class="sig-meta">'+s.freq+' MHz • '+s.len+' bytes</div></div>'+
     '<div class="sig-actions">'+
-    '<button class="btn-replay" onclick="send(\'REPLAY:'+s.id+'\')">📡 پخش</button>'+
-    '<button class="btn-del" onclick="delSignal('+s.id+')">🗑</button>'+
-    '</div></div></div>').join('');}
-function delSignal(id){if(confirm('حذف شود؟'))send('DEL:'+id);}
-function clearAllSignals(){if(confirm('همه سیگنال‌ها حذف شوند؟'))send('CLEAR_ALL');}
-function loadSettings(){send('GET_SETTINGS');}
-function applySettings(d){document.getElementById('setFreq').value=d.freq;
+    '<button class="btn btn-green btn-sm" onclick="playSig('+s.id+')">📡</button>'+
+    '<button class="btn btn-stop btn-sm" onclick="delSig('+s.id+')">🗑</button>'+
+    '</div></div></div>').join('');
+}
+function playSig(id){ send('PLAY:'+id); }
+function delSig(id){ if(confirm('حذف شود؟')) send('DEL:'+id); }
+function clearAll(){ if(confirm('همه سیگنال‌ها حذف شوند؟')) send('CLEAR_ALL'); }
+
+// === Settings ===
+function applySettings(d){
+  document.getElementById('setFreq').value=d.freq;
   document.getElementById('setBitrate').value=d.bitrate;
   document.getElementById('setPower').value=d.power;
-  document.getElementById('setRssiTh').value=d.rssiThreshold;
-  document.getElementById('setScanStart').value=d.scanStart;
-  document.getElementById('setScanEnd').value=d.scanEnd;
-  document.getElementById('setScanStep').value=d.scanStep;
-  document.getElementById('thSlider').value=d.rssiThreshold;
-  document.getElementById('thVal').textContent=d.rssiThreshold;
-  setBitrateUI(d.bitrate);}
-function saveSettings(){const s={freq:parseFloat(document.getElementById('setFreq').value),
-  bitrate:parseFloat(document.getElementById('setBitrate').value),
-  power:parseInt(document.getElementById('setPower').value),
-  rssiThreshold:parseInt(document.getElementById('setRssiTh').value),
-  scanStart:parseFloat(document.getElementById('setScanStart').value),
-  scanEnd:parseFloat(document.getElementById('setScanEnd').value),
-  scanStep:parseFloat(document.getElementById('setScanStep').value)};
-  send('SAVE_SETTINGS:'+JSON.stringify(s));}
-function resetSettings(){if(confirm('بازگشت به پیش‌فرض؟'))send('RESET_SETTINGS');}
-function setStatus(s){document.getElementById('statusTxt').textContent=s;}
-connectWS();
+  document.getElementById('setTh').value=d.threshold;
+  document.getElementById('recTh').value=d.threshold;
+  document.getElementById('recThV').textContent=d.threshold;
+  setBitrateUI(d.bitrate);
+  setSbFreq(d.freq);
+}
+function saveSettings(){
+  const s={
+    freq:parseFloat(document.getElementById('setFreq').value),
+    bitrate:parseFloat(document.getElementById('setBitrate').value),
+    power:parseInt(document.getElementById('setPower').value),
+    threshold:parseInt(document.getElementById('setTh').value),
+    scanStart:430, scanEnd:440, scanStep:0.1
+  };
+  send('SAVE:'+JSON.stringify(s));
+}
+function resetSettings(){ if(confirm('بازگشت به پیش‌فرض؟')) send('RESET'); }
+
+connect();
 </script></body></html>
-)HTMLPAGE";
+)HTML";
 
-// ==================== Forward Declarations ====================
-void finishRecording();
+// ==================== Forward ====================
+byte readRssiReg();
+int  readRssi();
+void sendStatus(const String&);
+void sendList();
 void reinitRadio();
-void loadSettings();
-void saveSettingsToPrefs();
-byte readRssiRegister();
-int readRSSI();
+void finishRecording();
 
-// ==================== JSON Helpers ====================
-void notifyScan(float freq, int rssi) {
-  ws.textAll("{\"type\":\"SCAN\",\"freq\":" + String(freq, 2) + ",\"rssi\":" + String(rssi) + "}");
+// ==================== WS Helpers ====================
+void sendStatus(const String& m){
+  String s=m; s.replace("\\","\\\\"); s.replace("\"","\\\"");
+  ws.textAll("{\"type\":\"STATUS\",\"msg\":\""+s+"\"}");
 }
-void notifyDiag(float freq, int raw, int dbm) {
-  ws.textAll("{\"type\":\"DIAG\",\"freq\":" + String(freq, 2) + ",\"raw\":" + String(raw) + ",\"dbm\":" + String(dbm) + "}");
-}
-void notifyStatus(const String& msg) {
-  String s = msg; s.replace("\\", "\\\\"); s.replace("\"", "\\\"");
-  ws.textAll("{\"type\":\"STATUS\",\"msg\":\"" + s + "\"}");
-}
-void notifySignalList() {
-  String out = "{\"type\":\"SIGNALS\",\"list\":[";
-  for (uint16_t i = 0; i < sigCount; i++) {
-    if (i) out += ",";
-    out += "{\"id\":" + String(sigIndex[i].id) + ",\"freq\":" + String(sigIndex[i].freq, 2) + ",\"len\":" + String(sigIndex[i].len) + ",\"bitrate\":" + String(sigIndex[i].bitrate, 1) + "}";
+void sendList(){
+  String out="{\"type\":\"SIGNALS\",\"list\":[";
+  for(int i=0;i<signalCount;i++){
+    if(i)out+=",";
+    String nm=signals[i].name; nm.replace("\"","");
+    out+="{\"id\":"+String(signals[i].id)+",\"name\":\""+nm+"\",";
+    out+="\"freq\":"+String(signals[i].freq,2)+",\"len\":"+String(signals[i].len)+"}";
   }
-  out += "]}"; ws.textAll(out);
+  out+="]}";
+  ws.textAll(out);
 }
-void notifySettings() {
-  String out = "{\"type\":\"SETTINGS\",\"data\":{";
-  out += "\"freq\":" + String(cfgFreq, 2);
-  out += ",\"bitrate\":" + String(cfgBitrate, 2);
-  out += ",\"power\":" + String(cfgPower);
-  out += ",\"rssiThreshold\":" + String(cfgRssiThreshold);
-  out += ",\"scanStart\":" + String(scanStart, 2);
-  out += ",\"scanEnd\":" + String(scanEnd, 2);
-  out += ",\"scanStep\":" + String(scanStep, 2);
-  out += "}}"; ws.textAll(out);
+void sendSettings(){
+  String out="{\"type\":\"SETTINGS\",\"data\":{";
+  out+="\"freq\":"+String(cfgFreq,2);
+  out+=",\"bitrate\":"+String(cfgBitrate,2);
+  out+=",\"power\":"+String(cfgPower);
+  out+=",\"threshold\":"+String(cfgThreshold);
+  out+="}}"; ws.textAll(out);
+}
+
+// ==================== File I/O ====================
+void saveSigFile(int id,uint8_t* d,uint16_t n){
+  char p[24]; snprintf(p,sizeof(p),"/s%d.bin",id);
+  File f=LittleFS.open(p,"w"); if(!f)return;
+  f.write(d,n); f.close();
+}
+bool loadSigFile(int id,uint8_t* d,uint16_t* n){
+  char p[24]; snprintf(p,sizeof(p),"/s%d.bin",id);
+  File f=LittleFS.open(p,"r"); if(!f)return false;
+  *n=f.read(d,2048); f.close(); return *n>0;
+}
+void delSigFile(int id){
+  char p[24]; snprintf(p,sizeof(p),"/s%d.bin",id);
+  LittleFS.remove(p);
+}
+void loadIndex(){
+  signalCount=0;
+  File f=LittleFS.open("/idx","r"); if(!f)return;
+  f.read((uint8_t*)&signalCount,sizeof(signalCount));
+  if(signalCount>MAX_SIGNALS||signalCount<0){signalCount=0;f.close();return;}
+  for(int i=0;i<signalCount;i++){
+    f.read((uint8_t*)&signals[i],sizeof(Signal));
+    if(signals[i].id>=nextId) nextId=signals[i].id+1;
+  }
+  f.close();
+}
+void saveIndex(){
+  File f=LittleFS.open("/idx","w"); if(!f)return;
+  f.write((uint8_t*)&signalCount,sizeof(signalCount));
+  for(int i=0;i<signalCount;i++) f.write((uint8_t*)&signals[i],sizeof(Signal));
+  f.close();
 }
 
 // ==================== Preferences ====================
-void loadSettings() {
-  prefs.begin("rfcfg", true);
-  cfgFreq = prefs.getFloat("freq", 433.92);
-  cfgBitrate = prefs.getFloat("bitrate", 4.8);
-  cfgPower = prefs.getInt("power", 20);
-  cfgRssiThreshold = prefs.getInt("rssiTh", -85);
-  scanStart = prefs.getFloat("scanStart", 430.0);
-  scanEnd = prefs.getFloat("scanEnd", 440.0);
-  scanStep = prefs.getFloat("scanStep", 0.1);
-  cfgOOKMode = prefs.getBool("ook", true);
+void loadPrefs(){
+  prefs.begin("rfcfg",true);
+  cfgFreq=prefs.getFloat("freq",433.92);
+  cfgBitrate=prefs.getFloat("bitrate",4.8);
+  cfgPower=prefs.getInt("power",20);
+  cfgThreshold=prefs.getInt("th",-85);
+  scanStart=prefs.getFloat("ss",430.0);
+  scanEnd=prefs.getFloat("se",440.0);
+  scanStep=prefs.getFloat("st",0.1);
+  cfgOOK=prefs.getBool("ook",true);
   prefs.end();
 }
-void saveSettingsToPrefs() {
-  prefs.begin("rfcfg", false);
-  prefs.putFloat("freq", cfgFreq); prefs.putFloat("bitrate", cfgBitrate);
-  prefs.putInt("power", cfgPower);
-  prefs.putInt("rssiTh", cfgRssiThreshold);
-  prefs.putFloat("scanStart", scanStart); prefs.putFloat("scanEnd", scanEnd);
-  prefs.putFloat("scanStep", scanStep); prefs.putBool("ook", cfgOOKMode);
+void savePrefs(){
+  prefs.begin("rfcfg",false);
+  prefs.putFloat("freq",cfgFreq);
+  prefs.putFloat("bitrate",cfgBitrate);
+  prefs.putInt("power",cfgPower);
+  prefs.putInt("th",cfgThreshold);
+  prefs.putFloat("ss",scanStart);
+  prefs.putFloat("se",scanEnd);
+  prefs.putFloat("st",scanStep);
+  prefs.putBool("ook",cfgOOK);
   prefs.end();
-}
-
-// ==================== LittleFS ====================
-void loadIndex() {
-  sigCount = 0;
-  File f = LittleFS.open("/idx.bin", "r");
-  if (!f) return;
-  f.read((uint8_t*)&sigCount, sizeof(sigCount));
-  if (sigCount > MAX_SIGNALS) { sigCount = 0; f.close(); return; }
-  for (uint16_t i = 0; i < sigCount; i++) {
-    f.read((uint8_t*)&sigIndex[i], sizeof(SigEntry));
-    if (sigIndex[i].id >= nextSigId) nextSigId = sigIndex[i].id + 1;
-  }
-  f.close();
-}
-void saveIndex() {
-  File f = LittleFS.open("/idx.bin", "w"); if (!f) return;
-  f.write((uint8_t*)&sigCount, sizeof(sigCount));
-  for (uint16_t i = 0; i < sigCount; i++) f.write((uint8_t*)&sigIndex[i], sizeof(SigEntry));
-  f.close();
-}
-bool saveSignal(float freq, uint8_t* data, uint16_t len, uint8_t bitrate) {
-  if (sigCount >= MAX_SIGNALS) return false;
-  uint16_t id = nextSigId++;
-  char path[24]; snprintf(path, sizeof(path), "/sig_%u.bin", id);
-  File f = LittleFS.open(path, "w"); if (!f) return false;
-  f.write(data, len); f.close();
-  sigIndex[sigCount].id = id; sigIndex[sigCount].freq = freq;
-  sigIndex[sigCount].len = len; sigIndex[sigCount].bitrate = bitrate;
-  sigCount++; saveIndex(); return true;
-}
-bool loadSignal(uint16_t id, float* freq, uint8_t* buf, uint16_t* len, uint8_t* br) {
-  for (uint16_t i = 0; i < sigCount; i++) {
-    if (sigIndex[i].id == id) {
-      char path[24]; snprintf(path, sizeof(path), "/sig_%u.bin", id);
-      File f = LittleFS.open(path, "r"); if (!f) return false;
-      *len = sigIndex[i].len; *freq = sigIndex[i].freq; *br = sigIndex[i].bitrate;
-      f.read(buf, *len); f.close(); return true;
-    }
-  }
-  return false;
-}
-void deleteSignal(uint16_t id) {
-  for (uint16_t i = 0; i < sigCount; i++) {
-    if (sigIndex[i].id == id) {
-      char path[24]; snprintf(path, sizeof(path), "/sig_%u.bin", id);
-      LittleFS.remove(path);
-      for (uint16_t j = i; j < sigCount - 1; j++) sigIndex[j] = sigIndex[j + 1];
-      sigCount--; saveIndex(); return;
-    }
-  }
-}
-void clearAllSignals() {
-  for (uint16_t i = 0; i < sigCount; i++) {
-    char path[24]; snprintf(path, sizeof(path), "/sig_%u.bin", sigIndex[i].id);
-    LittleFS.remove(path);
-  }
-  sigCount = 0; saveIndex();
 }
 
 // ==================== Radio Init ====================
-void reinitRadio() {
+void reinitRadio(){
   Serial.print("[Si4432] init... ");
-  if (!radio.init()) {
-    Serial.println("FAILED");
-    notifyStatus("خطای راه‌اندازی Si4432");
-    return;
-  }
+  if(!radio.init()){ Serial.println("FAILED"); sendStatus("خطای Si4432"); return; }
   radio.setFrequency(cfgFreq);
   radio.setBaudRate(cfgBitrate);
-  radio.setModulationType(cfgOOKMode ? Si4432::OOK : Si4432::GFSK);
-  radio.setTransmitPower((byte)map(cfgPower, -1, 20, 0, 7));
+  radio.setModulationType(cfgOOK ? Si4432::OOK : Si4432::GFSK);
+  radio.setTransmitPower((byte)map(cfgPower,-1,20,0,7));
   radio.setPacketHandling(false);
   radio.setManchesterEncoding(false);
   radio.turnOn();
-  pinMode(PIN_CS, OUTPUT);
-  digitalWrite(PIN_CS, HIGH);
-  Serial.println("OK (OOK=" + String(cfgOOKMode) + ", BR=" + String(cfgBitrate) + ")");
+  pinMode(PIN_CS,OUTPUT);
+  digitalWrite(PIN_CS,HIGH);
+  Serial.println("OK");
 }
 
 // ==================== RSSI Direct SPI ====================
-byte readRssiRegister() {
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
-  digitalWrite(PIN_CS, LOW);
-  delayMicroseconds(2);
-  SPI.transfer(0x26 & 0x7F);
-  byte result = SPI.transfer(0x00);
-  digitalWrite(PIN_CS, HIGH);
+byte readRssiReg(){
+  SPI.beginTransaction(SPISettings(1000000,MSBFIRST,SPI_MODE0));
+  digitalWrite(PIN_CS,LOW);
+  delayMicroseconds(5);
+  SPI.transfer(0x26);
+  delayMicroseconds(5);
+  byte r=SPI.transfer(0x00);
+  delayMicroseconds(5);
+  digitalWrite(PIN_CS,HIGH);
   SPI.endTransaction();
-  return result;
+  return r;
 }
-
-int readRSSI() {
-  byte raw = readRssiRegister();
-  int dbm = (int)(0.5 * raw) - 131;
-  return dbm;
+int readRssi(){
+  byte maxR=0;
+  for(int i=0;i<3;i++){
+    byte r=readRssiReg();
+    if(r>maxR) maxR=r;
+    delayMicroseconds(80);
+  }
+  return (int)(0.5f*maxR)-131;
 }
 
 // ==================== Scan ====================
-void doScan() {
-  if (!scanning) return;
-  if (currentFreq > scanEnd) currentFreq = scanStart;
-
+void doScan(){
+  if(!scanning) return;
+  if(currentFreq>scanEnd) currentFreq=scanStart;
   radio.setFrequency(currentFreq);
   radio.turnOn();
   delay(30);
-
-  int rssi = readRSSI();
-  notifyScan(currentFreq, rssi);
-
-  currentFreq += scanStep;
+  int rssi=readRssi();
+  ws.textAll("{\"type\":\"SCAN\",\"freq\":"+String(currentFreq,2)+",\"rssi\":"+String(rssi)+"}");
+  currentFreq+=scanStep;
 }
 
 // ==================== Diagnostic ====================
-void doDiagnostic() {
-  if (!diagnosticMode) return;
-
+void doDiagnostic(){
+  if(!diagnosticMode) return;
   radio.setFrequency(currentFreq);
   radio.turnOn();
   delay(30);
-
-  byte raw = readRssiRegister();
-  int rssi = (int)(0.5 * raw) - 131;
-  notifyDiag(currentFreq, raw, rssi);
-
-  Serial.print("[DIAG] ");
-  Serial.print(currentFreq, 2);
-  Serial.print(" MHz | RAW=");
-  Serial.print(raw);
-  Serial.print(" | dBm=");
-  Serial.println(rssi);
-
-  currentFreq += scanStep;
-  if (currentFreq > scanEnd) currentFreq = scanStart;
+  byte raw=readRssiReg();
+  int rssi=(int)(0.5f*raw)-131;
+  ws.textAll("{\"type\":\"DIAG\",\"freq\":"+String(currentFreq,2)+",\"raw\":"+String(raw)+",\"dbm\":"+String(rssi)+"}");
+  currentFreq+=scanStep;
+  if(currentFreq>scanEnd) currentFreq=scanStart;
 }
 
-// ==================== Recording (RSSI envelope) ====================
-void startRecording() {
-  scanning = false; recording = true; diagnosticMode = false;
-  recordLen = 0; recordBitBuf = 0; recordBitCount = 0;
-  recordFreq = currentFreq;
-  lastRecvTime = millis();
-  lastSampleUs = micros();
-  radio.setFrequency(recordFreq);
+// ==================== Recording ====================
+void startRecording(float freq,const char* name){
+  recState=1;
+  recLen=0; recBit=0; recBitCnt=0;
+  recStartMs=millis(); recLastMs=millis();
+  strncpy(recName,name,NAME_LEN-1); recName[NAME_LEN-1]=0;
+  recFreq=freq;
+  radio.setFrequency(recFreq);
   radio.turnOn();
-  delay(50);
-  notifyStatus("Recording @ " + String(recordFreq, 2) + " MHz");
+  delay(30);
+  sendStatus("🎙 آماده ضبط");
 }
 
-void finishRecording() {
-  recording = false;
-  if (recordLen == 0) { notifyStatus("داده‌ای دریافت نشد"); return; }
-  if (saveSignal(recordFreq, recordBuf, recordLen, (uint8_t)cfgBitrate)) {
-    notifyStatus("✅ ذخیره شد: " + String(recordLen) + " بایت");
-    notifySignalList();
-  } else notifyStatus("❌ حافظه پر است");
-  recordLen = 0;
+void finishRecording(){
+  recState=0;
+  ws.textAll("{\"type\":\"LIVE\",\"rssi\":0,\"state\":\"done\"}");
+  if(recLen==0){ sendStatus("❌ سیگنالی دریافت نشد"); return; }
+  if(signalCount>=MAX_SIGNALS){ sendStatus("❌ حافظه پر است"); return; }
+  int id=nextId++;
+  saveSigFile(id,recBuf,recLen);
+  Signal& s=signals[signalCount++];
+  s.id=id; s.freq=recFreq; s.len=recLen;
+  strncpy(s.name,recName,NAME_LEN-1); s.name[NAME_LEN-1]=0;
+  saveIndex();
+  sendStatus("✅ ذخیره شد: "+String(recLen)+" bytes");
+  sendList();
 }
 
-void doRecord() {
-  if (!recording) return;
+void doRecord(){
+  if(recState==0) return;
 
-  unsigned long nowUs = micros();
-  if (nowUs - lastSampleUs < SAMPLE_INTERVAL_US) return;
-  lastSampleUs = nowUs;
-
-  byte raw = readRssiRegister();
-  int dbm = (int)(0.5 * raw) - 131;
-  bool signal = (dbm > cfgRssiThreshold);
-
-  if (signal) recordBitBuf |= (0x80 >> recordBitCount);
-  recordBitCount++;
-
-  if (recordBitCount == 8) {
-    if (recordLen < MAX_RECORD) recordBuf[recordLen++] = recordBitBuf;
-    recordBitBuf = 0;
-    recordBitCount = 0;
-    if (signal) lastRecvTime = millis();
+  if(recState==1 && (millis()-recStartMs>REC_START_TIMEOUT_MS)){
+    sendStatus("❌ سیگنالی در ۵ ثانیه دریافت نشد");
+    recState=0;
+    ws.textAll("{\"type\":\"LIVE\",\"rssi\":0,\"state\":\"timeout\"}");
+    return;
   }
 
-  if (recordLen > 2 && (millis() - lastRecvTime > RECORD_TIMEOUT_MS)) {
-    if (recordBitCount > 0 && recordLen < MAX_RECORD) recordBuf[recordLen++] = recordBitBuf;
+  int rssi=readRssi();
+  bool sig=(rssi>cfgThreshold);
+  ws.textAll("{\"type\":\"LIVE\",\"rssi\":"+String(rssi)+
+             ",\"state\":\""+String(recState==1?"در انتظار سیگنال":"در حال ضبط")+"\"}");
+
+  if(recState==1){
+    if(sig){ recState=2; recLastMs=millis(); }
+    delayMicroseconds(150);
+    return;
+  }
+
+  if(sig){
+    recBit |= (0x80>>recBitCnt);
+    recLastMs=millis();
+  }
+  recBitCnt++;
+  if(recBitCnt==8){
+    if(recLen<2048) recBuf[recLen++]=recBit;
+    recBit=0; recBitCnt=0;
+  }
+  if(millis()-recLastMs>REC_TIMEOUT_MS){
+    if(recBitCnt>0 && recLen<2048) recBuf[recLen++]=recBit;
     finishRecording();
   }
+  delayMicroseconds(150);
 }
 
 // ==================== Replay ====================
-void replaySignal(float freq, uint8_t* data, uint16_t len, uint8_t br) {
-  float savedBr = cfgBitrate;
-  cfgBitrate = br;
-  radio.setBaudRate(cfgBitrate);
-  radio.setFrequency(freq);
-  radio.turnOn();
-  delay(20);
-  radio.sendPacket((uint8_t)len, data);
-  delay(50);
-  cfgBitrate = savedBr;
-  radio.setBaudRate(cfgBitrate);
-  radio.startListening();
-  notifyStatus("📡 پخش شد: " + String(freq, 2) + " MHz");
+void replaySignal(int id){
+  for(int i=0;i<signalCount;i++){
+    if(signals[i].id==id){
+      static uint8_t buf[2048]; uint16_t len;
+      if(!loadSigFile(id,buf,&len)){ sendStatus("❌ فایل یافت نشد"); return; }
+      radio.setFrequency(signals[i].freq);
+      radio.turnOn();
+      delay(20);
+      radio.sendPacket((uint8_t)len,buf);
+      delay(60);
+      radio.turnOn();
+      sendStatus("📡 ارسال شد: "+String(signals[i].name));
+      return;
+    }
+  }
+  sendStatus("❌ یافت نشد");
+}
+
+void deleteSignal(int id){
+  for(int i=0;i<signalCount;i++){
+    if(signals[i].id==id){
+      delSigFile(id);
+      for(int j=i;j<signalCount-1;j++) signals[j]=signals[j+1];
+      signalCount--;
+      saveIndex();
+      sendList();
+      sendStatus("🗑 حذف شد");
+      return;
+    }
+  }
+}
+
+void clearAllSignals(){
+  for(int i=0;i<signalCount;i++) delSigFile(signals[i].id);
+  signalCount=0; saveIndex();
+  sendList();
+  sendStatus("🗑 همه حذف شدند");
 }
 
 // ==================== WebSocket ====================
-void onWsEvent(AsyncWebSocket* srv, AsyncWebSocketClient* client,
-               AwsEventType type, void* arg, uint8_t* data, size_t len) {
-  if (type != WS_EVT_DATA) return;
-  String cmd; cmd.reserve(len + 1);
-  for (size_t i = 0; i < len; i++) cmd += (char)data[i];
+void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,uint8_t* d,size_t l){
+  if(t!=WS_EVT_DATA)return;
+  String cmd; cmd.reserve(l+1);
+  for(size_t i=0;i<l;i++) cmd+=(char)d[i];
   cmd.trim();
 
-  if (cmd == "SCAN") { scanning = true; recording = false; diagnosticMode = false; currentFreq = scanStart; notifyStatus("در حال اسکن..."); }
-  else if (cmd == "RECORD") startRecording();
-  else if (cmd == "STOP") { scanning = false; if (recording) finishRecording(); diagnosticMode = false; notifyStatus("متوقف"); }
-  else if (cmd == "LIST") notifySignalList();
-  else if (cmd == "GET_SETTINGS") notifySettings();
-  else if (cmd == "CLEAR_ALL") { clearAllSignals(); notifySignalList(); notifyStatus("همه حذف شد"); }
-  else if (cmd.startsWith("DEL:")) {
-    uint16_t id = cmd.substring(4).toInt();
-    deleteSignal(id); notifySignalList(); notifyStatus("حذف شد");
+  if(cmd=="SCAN"){ scanning=true; diagnosticMode=false; recState=0; currentFreq=scanStart; sendStatus("در حال اسکن..."); }
+  else if(cmd=="STOP"){ scanning=false; diagnosticMode=false; if(recState)finishRecording(); sendStatus("متوقف"); }
+  else if(cmd=="LIST"){ sendList(); }
+  else if(cmd=="GET_SETTINGS"){ sendSettings(); }
+  else if(cmd=="CLEAR_ALL"){ clearAllSignals(); }
+  else if(cmd=="DIAG_TOGGLE"){
+    diagnosticMode=!diagnosticMode; scanning=false; recState=0;
+    if(diagnosticMode){ currentFreq=scanStart; sendStatus("عیب‌یابی فعال"); }
+    else sendStatus("عیب‌یابی غیرفعال");
   }
-  else if (cmd == "DIAG_TOGGLE") {
-    diagnosticMode = !diagnosticMode; scanning = false; recording = false;
-    if (diagnosticMode) { currentFreq = scanStart; notifyStatus("حالت عیب‌یابی فعال"); }
-    else notifyStatus("حالت عیب‌یابی غیرفعال");
+  else if(cmd=="TOGGLE_OOK"){
+    cfgOOK=!cfgOOK; savePrefs(); reinitRadio();
+    ws.textAll("{\"type\":\"OOK\",\"on\":"+String(cfgOOK?"true":"false")+"}");
+    sendStatus(cfgOOK?"OOK روشن":"GFSK روشن");
   }
-  else if (cmd == "TOGGLE_OOK") {
-    cfgOOKMode = !cfgOOKMode;
-    saveSettingsToPrefs();
-    reinitRadio();
-    ws.textAll("{\"type\":\"OOK\",\"on\":" + String(cfgOOKMode ? "true" : "false") + "}");
-    notifyStatus(cfgOOKMode ? "OOK mode ON" : "GFSK mode ON");
-  }
-  else if (cmd.startsWith("SET_BITRATE:")) {
-    float br = cmd.substring(12).toFloat();
-    if (br >= 0.5 && br <= 128) {
-      cfgBitrate = br;
-      radio.setBaudRate(cfgBitrate);
-      saveSettingsToPrefs();
-      ws.textAll("{\"type\":\"BITRATE\",\"value\":" + String(br, 1) + "}");
-      notifyStatus("بیت‌ریت: " + String(br, 1) + " kbps");
+  else if(cmd.startsWith("REC:")){
+    int c1=cmd.indexOf(':',4);
+    if(c1>0){
+      float f=cmd.substring(4,c1).toFloat();
+      String n=cmd.substring(c1+1);
+      if(f<240||f>930){ sendStatus("❌ فرکانس نامعتبر"); return; }
+      startRecording(f,n.c_str());
     }
   }
-  else if (cmd.startsWith("THRESH:")) {
-    cfgRssiThreshold = cmd.substring(7).toInt();
-    saveSettingsToPrefs();
+  else if(cmd.startsWith("PLAY:")){ replaySignal(cmd.substring(5).toInt()); }
+  else if(cmd.startsWith("DEL:")){ deleteSignal(cmd.substring(4).toInt()); }
+  else if(cmd.startsWith("SET_BITRATE:")){
+    float br=cmd.substring(12).toFloat();
+    if(br>=0.5&&br<=128){
+      cfgBitrate=br; radio.setBaudRate(br); savePrefs();
+      ws.textAll("{\"type\":\"BITRATE\",\"value\":"+String(br,1)+"}");
+      sendStatus("بیت‌ریت: "+String(br,1)+" kbps");
+    }
   }
-  else if (cmd.startsWith("SET_FREQ:")) {
-    cfgFreq = cmd.substring(9).toFloat();
-    if (cfgFreq >= 240 && cfgFreq <= 930) { radio.setFrequency(cfgFreq); notifyStatus("فرکانس: " + String(cfgFreq, 2) + " MHz"); }
+  else if(cmd.startsWith("THRESH:")){
+    cfgThreshold=cmd.substring(7).toInt(); savePrefs();
   }
-  else if (cmd.startsWith("REPLAY:")) {
-    uint16_t id = cmd.substring(7).toInt();
-    float freq; uint8_t buf[MAX_RECORD]; uint16_t blen; uint8_t br;
-    if (loadSignal(id, &freq, buf, &blen, &br)) replaySignal(freq, buf, blen, br);
-    else notifyStatus("سیگنال یافت نشد");
+  else if(cmd.startsWith("SET_FREQ:")){
+    float f=cmd.substring(9).toFloat();
+    if(f>=240&&f<=930){ cfgFreq=f; radio.setFrequency(f); savePrefs(); sendStatus("فرکانس: "+String(f,2)); }
   }
-  else if (cmd.startsWith("SAVE_SETTINGS:")) {
-    // parse JSON manually (simple)
+  else if(cmd.startsWith("SAVE:")){
+    String j=cmd.substring(5);
     int p;
-    p = cmd.indexOf("\"freq\":"); if (p > 0) cfgFreq = cmd.substring(p + 7).toFloat();
-    p = cmd.indexOf("\"bitrate\":"); if (p > 0) cfgBitrate = cmd.substring(p + 10).toFloat();
-    p = cmd.indexOf("\"power\":"); if (p > 0) cfgPower = cmd.substring(p + 8).toInt();
-    p = cmd.indexOf("\"rssiThreshold\":"); if (p > 0) cfgRssiThreshold = cmd.substring(p + 16).toInt();
-    p = cmd.indexOf("\"scanStart\":"); if (p > 0) scanStart = cmd.substring(p + 12).toFloat();
-    p = cmd.indexOf("\"scanEnd\":"); if (p > 0) scanEnd = cmd.substring(p + 10).toFloat();
-    p = cmd.indexOf("\"scanStep\":"); if (p > 0) scanStep = cmd.substring(p + 11).toFloat();
-    saveSettingsToPrefs();
-    reinitRadio();
-    notifyStatus("✅ تنظیمات ذخیره شد");
+    p=j.indexOf("\"freq\":"); if(p>0) cfgFreq=j.substring(p+7).toFloat();
+    p=j.indexOf("\"bitrate\":"); if(p>0) cfgBitrate=j.substring(p+10).toFloat();
+    p=j.indexOf("\"power\":"); if(p>0) cfgPower=j.substring(p+8).toInt();
+    p=j.indexOf("\"threshold\":"); if(p>0) cfgThreshold=j.substring(p+12).toInt();
+    savePrefs(); reinitRadio(); sendSettings();
+    sendStatus("✅ تنظیمات ذخیره شد");
   }
-  else if (cmd == "RESET_SETTINGS") {
-    prefs.begin("rfcfg", false); prefs.clear(); prefs.end();
-    notifyStatus("تنظیمات بازنشانی شد — ریبوت کنید");
+  else if(cmd=="RESET"){
+    prefs.begin("rfcfg",false); prefs.clear(); prefs.end();
+    loadPrefs(); reinitRadio(); sendSettings();
+    sendStatus("تنظیمات بازنشانی شد");
   }
 }
 
-// ==================== WiFi / Setup / Loop ====================
-void initWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(STA_SSID, STA_PASS);
-  Serial.print("[WiFi] Connecting");
-  unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) { delay(500); Serial.print('.'); }
-  if (WiFi.status() == WL_CONNECTED) Serial.println("\n[WiFi] IP: " + WiFi.localIP().toString());
-  else {
-    Serial.println("\n[WiFi] AP mode");
-    WiFi.mode(WIFI_AP); WiFi.softAP(AP_SSID, AP_PASS);
-    Serial.println("[WiFi] AP IP: " + WiFi.softAPIP().toString());
-  }
-}
-void setup() {
+// ==================== Setup / Loop ====================
+void setup(){
   Serial.begin(115200); delay(500);
-  Serial.println("\n=== Si4432 B1 Scanner Pro ===");
-  if (!LittleFS.begin(true)) Serial.println("[FS] mount failed");
-  loadIndex(); loadSettings();
-  initWiFi();
+  Serial.println("\n=== Si4432 Pro (Flipper UI) ===");
+
+  if(!LittleFS.begin(true)) Serial.println("FS failed");
+  loadIndex();
+  loadPrefs();
   reinitRadio();
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID,AP_PASS);
+  Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
 
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest* r) {
-    r->send_P(200, "text/html; charset=utf-8", INDEX_HTML);
+  server.on("/",HTTP_GET,[](AsyncWebServerRequest* r){
+    r->send_P(200,"text/html; charset=utf-8",HTML);
   });
   ElegantOTA.begin(&server);
   server.begin();
-  Serial.println("[HTTP] http://" + WiFi.localIP().toString() + "/");
-  Serial.println("[OTA]  http://" + WiFi.localIP().toString() + "/update");
+  Serial.println("Ready — connect to WiFi 'RF-Recorder' pass '12345678'");
 }
-void loop() {
+
+void loop(){
   ElegantOTA.loop();
   ws.cleanupClients();
-  if (diagnosticMode) doDiagnostic();
-  else if (scanning) doScan();
-  if (recording) doRecord();
+  if(diagnosticMode) doDiagnostic();
+  else if(scanning) doScan();
+  if(recState) doRecord();
   delay(1);
 }
