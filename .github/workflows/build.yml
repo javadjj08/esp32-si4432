@@ -28,16 +28,9 @@ jobs:
       - name: Install ElegantOTA
         run: arduino-cli lib install "ElegantOTA@3.1.6"
 
-      - name: Install Si4432 library and fix path
+      - name: Install Si4432 library
         run: |
           ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true arduino-cli lib install --git-url https://github.com/jnsbyr/Arduino-SI4432.git
-          LIB_DIR=$(find ~/Arduino/libraries -maxdepth 1 -name "Arduino-SI4432*" -type d | head -n 1)
-          echo "Found library at: $LIB_DIR"
-          mkdir -p ~/Arduino/libraries/Si443x
-          cp "$LIB_DIR"/*.h ~/Arduino/libraries/Si443x/ 2>/dev/null || true
-          cp "$LIB_DIR"/*.cpp ~/Arduino/libraries/Si443x/ 2>/dev/null || true
-          cp -r "$LIB_DIR"/src/* ~/Arduino/libraries/Si443x/ 2>/dev/null || true
-          ls -la ~/Arduino/libraries/Si443x/
 
       - name: Compile
         run: |
