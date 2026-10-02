@@ -1,7 +1,7 @@
 /*
  * Si4432 BPS1EZ Universal RF Remote Replay Tool
  * ESP32 DevKit V1 + Si4432
- * Library: jnsbyr/Arduino-SI4432 (OOK + SPI Transactions)
+ * Library: jnsbyr/Arduino-SI4432
  * Features: Manual Freq, Scan, Record, Replay, Settings, OOK/FSK, OTA
  */
 
@@ -10,7 +10,7 @@
 #include <SPI.h>
 #include <LittleFS.h>
 #include <Preferences.h>
-#include <Si443x.h>
+#include <si4432.h> // <-- نام هدر صحیح بر اساس کتابخانه jnsbyr
 #include <ESPAsyncWebServer.h>
 #include <ElegantOTA.h>
 
@@ -30,7 +30,6 @@ const char* AP_PASS  = "12345678";
 Preferences prefs;
 float cfgFreq = 433.92;
 float cfgBitrate = 4.8;
-float cfgFreqDev = 5.0;
 int8_t cfgPower = 20;
 int cfgRssiThreshold = -75;
 float scanStart = 430.0;
@@ -39,7 +38,7 @@ float scanStep  = 0.1;
 bool  cfgOOKMode = true;
 
 // ==================== Si4432 ====================
-Si443x radio(PIN_CS, PIN_SDN, PIN_IRQ, PIN_GPIO);
+Si443x radio(PIN_CS, PIN_SDN, PIN_IRQ, PIN_GPIO); // <-- نام کلاس صحیح
 
 // ==================== State ====================
 bool scanning = false;
