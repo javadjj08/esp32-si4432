@@ -2,8 +2,6 @@
  * Si4432 Pro - Advanced RF Remote Tool
  * ESP32 DevKit V1 + Si4432
  * Library: nopnop2002/Arduino-SI4432
- * Features: Scan, Record, Replay, Multi-Replay, Auto-Bitrate,
- *           Auto-Threshold, Notes, Hex View, RSSI Graph, SDR, Diagnostic
  */
 
 #include <Arduino.h>
@@ -355,7 +353,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   <button class="rec-cancel" onclick="cancelRecord()">لغو</button>
 </div>
 
-<!-- Hex Modal -->
 <div class="modal" id="hexModal">
   <div class="modal-content">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
@@ -618,7 +615,7 @@ connect();
 </script></body></html>
 )HTML";
 
-// ==================== Forward ====================
+// ==================== Forward Declarations ====================
 byte readRssiReg();
 int  readRssi();
 byte readRegister(byte reg);
@@ -628,6 +625,8 @@ void reinitRadio();
 void finishRecording();
 void runDiagnosticStep();
 void performAutoThreshold();
+void savePrefs();
+void loadPrefs();
 
 // ==================== WS Helpers ====================
 void sendStatus(const String& m){
@@ -675,13 +674,11 @@ byte readRegister(byte reg) {
 
 // ==================== Auto Threshold ====================
 void performAutoThreshold() {
-  long sum = 0;
-  int n = 0;
+  long sum = 0; int n = 0;
   for(int i=0;i<30;i++){
     byte raw = readRssiReg();
     int dbm = (int)(0.5f*raw)-131;
-    sum += dbm;
-    n++;
+    sum += dbm; n++;
     delay(30);
   }
   int baseline = sum / n;
@@ -693,7 +690,7 @@ void performAutoThreshold() {
   char buf[64];
   snprintf(buf, sizeof(buf), "{\"type\":\"THRESHOLD_SET\",\"value\":%d}", newTh);
   ws.textAll(buf);
-  snprintf(buf, sizeof(buf), "⚙️ baseline: %d dBm → threshold: %d dBm", baseline, newTh);
+  snprintf(buf, sizeof(buf), "⚙️ baseline: %d → threshold: %d dBm", baseline, newTh);
   sendStatus(String(buf));
 }
 
@@ -714,7 +711,7 @@ void runDiagnosticStep() {
   if (!diagMode) return;
   String out = "";
   if (diagStep == 0) {
-    out += "<div>🔍 <b>مرحله ۱: تست SPI</b></div>";
+    out += "<div>🔍 <b>مرحله ۱: SPI</b></div>";
     byte ver = readRegister(0x00);
     byte ver2 = readRegister(0x31);
     char buf[64];
@@ -729,8 +726,8 @@ void runDiagnosticStep() {
     char buf[64];
     snprintf(buf, sizeof(buf), "<div>RSSI: %d -> %d dBm</div>", raw, dbm);
     out += buf;
-    if (raw == 0 || raw == 255) out += "<div class='diag-fail'>❌ RSSI نامعتبر</div>";
-    else out += "<div class='diag-ok'>✅ RSSI معتبر</div>";
+    if (raw == 0 || raw == 255) out += "<div class='diag-fail'>❌ نامعتبر</div>";
+    else out += "<div class='diag-ok'>✅ معتبر</div>";
     diagStep++;
   } else if (diagStep == 2) {
     radio.setFrequency(433.92); radio.startListening(); delay(50);
@@ -738,9 +735,9 @@ void runDiagnosticStep() {
     radio.setFrequency(315.00); radio.startListening(); delay(50);
     int r2 = readRssi();
     char buf[80];
-    snprintf(buf, sizeof(buf), "<div>433.92 MHz: %d dBm</div><div>315 MHz: %d dBm</div>", r1, r2);
+    snprintf(buf, sizeof(buf), "<div>433.92: %d dBm | 315: %d dBm</div>", r1, r2);
     out += buf;
-    out += "<div class='diag-ok'>✅ تنظیم فرکانس OK</div>";
+    out += "<div class='diag-ok'>✅ فرکانس OK</div>";
     diagStep = 4;
   } else if (diagStep == 4) {
     out += "<div class='diag-ok'>✅ تست کامل شد</div>";
@@ -1053,7 +1050,6 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
     sendStatus(cfgManchester?"Manchester روشن":"Manchester خاموش");
   }
   else if(cmd.startsWith("REC:")){
-    // REC:freq:name:note
     int p1=cmd.indexOf(':',4);
     int p2=cmd.indexOf(':',p1+1);
     if(p1>0 && p2>0){
