@@ -31,12 +31,12 @@ float cfgBitrate = 4.8;
 int   cfgPower = 20;
 int   cfgThreshold = -85;
 bool  cfgOOK = true;
-bool  cfgManchester = false; // جدید: کدگذاری Manchester
+bool  cfgManchester = false;
 
 // ==================== State ====================
 bool scanning = false;
 bool sdrActive = false;
-bool diagMode = false; // حالت عیب‌یابی
+bool diagMode = false;
 int  recState = 0;
 float currentFreq = 433.92;
 float scanStart = 300.0;
@@ -65,10 +65,6 @@ unsigned long lastSdrSample = 0;
 // ==================== Diagnostic ====================
 int diagStep = 0;
 unsigned long diagLastUpdate = 0;
-float diagFreq = 433.92;
-int diagRssiRaw = 0;
-int diagRssiDbm = 0;
-String diagMessage = "شروع...";
 bool diagComplete = false;
 
 // ==================== Signals ====================
@@ -307,6 +303,18 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
     <button class="btn btn-ook" style="width:100%;margin-top:6px"
             onclick="send('SDR_SCAN')">🔍 پیدا کردن سیگنال صوتی</button>
     <div class="hint">اتوماتیک فرکانس‌ها را چک می‌کند و روی قوی‌ترین توقف می‌کند</div>
+  </div>
+
+  <div class="card">
+    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📻 فرکانس‌های رایج صوتی</div>
+    <div class="presets">
+      <button class="btn-preset" onclick="quickSdr(144.00)">144.00</button>
+      <button class="btn-preset" onclick="quickSdr(145.00)">145.00</button>
+      <button class="btn-preset" onclick="quickSdr(433.50)">433.50</button>
+      <button class="btn-preset" onclick="quickSdr(446.00)">446.00</button>
+      <button class="btn-preset" onclick="quickSdr(868.10)">868.10</button>
+      <button class="btn-preset" onclick="quickSdr(915.00)">915.00</button>
+    </div>
   </div>
 </div>
 
@@ -558,7 +566,6 @@ function quickSdr(f){
   setSdrFreq();
 }
 
-// === Diagnostic functions ===
 function startDiagnostic(){
   if(diagRunning) return;
   diagRunning = true;
@@ -570,9 +577,10 @@ connect();
 </script></body></html>
 )HTML";
 
-// ==================== Forward ====================
+// ==================== Forward Declarations ====================
 byte readRssiReg();
 int  readRssi();
+byte readRegister(byte reg);
 void sendStatus(const String&);
 void sendList();
 void reinitRadio();
@@ -604,19 +612,36 @@ void sendSettings(){
   out+="}}"; ws.textAll(out);
 }
 
+// ==================== Direct Register Read ====================
+byte readRegister(byte reg) {
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_CS, LOW);
+  delayMicroseconds(3);
+  SPI.transfer(reg & 0x7F);
+  delayMicroseconds(3);
+  byte result = SPI.transfer(0x00);
+  delayMicroseconds(3);
+  digitalWrite(PIN_CS, HIGH);
+  SPI.endTransaction();
+  return result;
+}
+
 // ==================== Diagnostic ====================
 void sendDiagOutput(String html) {
   html.replace("\"", "\\\"");
+  html.replace("\n", " ");
   ws.textAll("{\"type\":\"DIAG_OUTPUT\",\"html\":\"" + html + "\"}");
 }
 
 void sendSpiOutput(String html) {
   html.replace("\"", "\\\"");
+  html.replace("\n", " ");
   ws.textAll("{\"type\":\"DIAG_SPI_OUTPUT\",\"html\":\"" + html + "\"}");
 }
 
 void sendRssiOutput(String html) {
   html.replace("\"", "\\\"");
+  html.replace("\n", " ");
   ws.textAll("{\"type\":\"DIAG_RSSI_OUTPUT\",\"html\":\"" + html + "\"}");
 }
 
@@ -674,7 +699,8 @@ void runDiagnosticStep() {
     out += "<div>🔍 <b>مرحله ۴: تست ضبط کوتاه</b></div>";
     out += "<div>لطفاً دکمه ریموت را فشار دهید...</div>";
     diagStep++;
-    return; // منتظر بمانیم
+    sendDiagOutput(out);
+    return;
   }
   else if (diagStep == 4) {
     out += "<div class='diag-ok'>✅ تست کامل شد</div>";
@@ -759,16 +785,7 @@ void reinitRadio(){
 
 // ==================== RSSI Direct SPI ====================
 byte readRssiReg(){
-  SPI.beginTransaction(SPISettings(1000000,MSBFIRST,SPI_MODE0));
-  digitalWrite(PIN_CS,LOW);
-  delayMicroseconds(3);
-  SPI.transfer(0x26);
-  delayMicroseconds(3);
-  byte r=SPI.transfer(0x00);
-  delayMicroseconds(3);
-  digitalWrite(PIN_CS,HIGH);
-  SPI.endTransaction();
-  return r;
+  return readRegister(0x26);
 }
 int readRssi(){
   byte maxR=0;
@@ -1006,7 +1023,7 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
     }
     cfgFreq=bestF; radio.setFrequency(bestF); savePrefs();
     ws.textAll("{\"type\":\"SDR_FREQ\",\"freq\":"+String(bestF,2)+"}");
-    char buf[80];
+    char buf[100];
     snprintf(buf,sizeof(buf),"{\"type\":\"SDR_STATUS\",\"msg\":\"بهترین: %.2f MHz (%d dBm)\"}",bestF,bestR);
     ws.textAll(buf);
   }
@@ -1019,26 +1036,28 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
   else if(cmd=="DIAG_SPI"){
     byte v1 = readRegister(0x00);
     byte v2 = readRegister(0x31);
-    char buf[128];
+    char buf[160];
     snprintf(buf, sizeof(buf), "<div>0x00 = 0x%02X</div><div>0x31 = 0x%02X</div>", v1, v2);
+    String s = String(buf);
     if(v1 == 0x08 || v2 == 0x08) {
-      strcat(buf, "<div class='diag-ok'>✅ SPI OK</div>");
+      s += "<div class='diag-ok'>✅ SPI OK</div>";
     } else {
-      strcat(buf, "<div class='diag-fail'>❌ SPI FAIL</div>");
+      s += "<div class='diag-fail'>❌ SPI FAIL</div>";
     }
-    sendSpiOutput(String(buf));
+    sendSpiOutput(s);
   }
   else if(cmd=="DIAG_RSSI"){
     int raw = readRssiReg();
     int dbm = readRssi();
-    char buf[128];
+    char buf[160];
     snprintf(buf, sizeof(buf), "<div>RSSI خام: %d</div><div>dBm: %d</div>", raw, dbm);
+    String s = String(buf);
     if (raw == 0 || raw == 255) {
-      strcat(buf, "<div class='diag-fail'>❌ مقدار نامعتبر</div>");
+      s += "<div class='diag-fail'>❌ مقدار نامعتبر</div>";
     } else {
-      strcat(buf, "<div class='diag-ok'>✅ مقدار معتبر</div>");
+      s += "<div class='diag-ok'>✅ مقدار معتبر</div>";
     }
-    sendRssiOutput(String(buf));
+    sendRssiOutput(s);
   }
 }
 
@@ -1086,16 +1105,20 @@ void loop(){
     if(scanning) doScan();
     if(recState) doRecord();
     if(diagMode && diagStep == 3) {
-      // مرحله ۴: تست ضبط کوتاه
       static unsigned long lastDiagCheck = 0;
       if(millis() - lastDiagCheck > 2000) {
         lastDiagCheck = millis();
         int rssi = readRssi();
+        String out = "<div>🔍 <b>مرحله ۴: تست ضبط کوتاه</b></div>";
         if(rssi > cfgThreshold) {
-          sendDiagOutput("<div class='diag-ok'>✅ سیگنال شناسایی شد!</div><div>آستانه: " + String(cfgThreshold) + " dBm</div><div>RSSI: " + String(rssi) + " dBm</div>");
+          out += "<div class='diag-ok'>✅ سیگنال شناسایی شد!</div>";
         } else {
-          sendDiagOutput("<div class='diag-warn'>⚠️ سیگنالی شناسایی نشد</div><div>آستانه: " + String(cfgThreshold) + " dBm</div><div>RSSI: " + String(rssi) + " dBm</div>");
+          out += "<div class='diag-warn'>⚠️ سیگنالی شناسایی نشد</div>";
         }
+        char buf[64];
+        snprintf(buf, sizeof(buf), "<div>آستانه: %d dBm</div><div>RSSI: %d dBm</div>", cfgThreshold, rssi);
+        out += buf;
+        sendDiagOutput(out);
         diagStep = 4;
         runDiagnosticStep();
       }
