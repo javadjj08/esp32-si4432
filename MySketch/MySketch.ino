@@ -1,7 +1,9 @@
 /*
- * Si4432 Pro - RF Remote Tool with Analyzer + SDR + DIAGNOSTIC MODE
+ * Si4432 Pro - Advanced RF Remote Tool
  * ESP32 DevKit V1 + Si4432
  * Library: nopnop2002/Arduino-SI4432
+ * Features: Scan, Record, Replay, Multi-Replay, Auto-Bitrate,
+ *           Auto-Threshold, Notes, Hex View, RSSI Graph, SDR, Diagnostic
  */
 
 #include <Arduino.h>
@@ -51,6 +53,7 @@ uint8_t  recBitCnt = 0;
 unsigned long recStartMs = 0;
 unsigned long recLastMs = 0;
 char     recName[32] = "";
+char     recNote[64] = "";
 
 #define REC_TIMEOUT_MS 300
 #define REC_START_TIMEOUT_MS 5000
@@ -64,7 +67,6 @@ unsigned long lastSdrSample = 0;
 
 // ==================== Diagnostic ====================
 int diagStep = 0;
-unsigned long diagLastUpdate = 0;
 bool diagComplete = false;
 
 // ==================== Signals ====================
@@ -91,9 +93,7 @@ body{font-family:Tahoma,sans-serif;background:#0a0e17;color:#e0e6ed;
 #statusbar{background:#0d1420;padding:8px 12px;display:flex;justify-content:space-between;
   align-items:center;border-bottom:1px solid #1e2a45;font-family:monospace;font-size:.8em;
   min-height:40px;position:sticky;top:0;z-index:10}
-#sbFreq{color:#00e5ff;font-weight:bold}
-#sbRssi{color:#f9a825}
-#sbState{color:#8899aa}
+#sbFreq{color:#00e5ff;font-weight:bold}#sbRssi{color:#f9a825}#sbState{color:#8899aa}
 .screen{display:none;padding:12px;flex:1;overflow-y:auto}
 .screen.active{display:block}
 .header{display:flex;align-items:center;gap:10px;margin-bottom:12px;
@@ -124,7 +124,7 @@ input:focus{outline:none;border-color:#00e5ff}
 .btn-stop{background:#2d3a54;color:#e0e6ed;flex:1}
 .btn-green{background:#00b894;color:#fff}
 .btn-ook{background:#f9a825;color:#000;flex:1}
-.btn-preset{background:#34495e;color:#fff;padding:8px 4px;font-size:.7em;flex:1;min-width:60px;margin:2px}
+.btn-preset{background:#34495e;color:#fff;padding:8px 4px;font-size:.7em;flex:1;min-width:50px;margin:2px}
 .btn-preset.active{background:#00e5ff;color:#0a0e17}
 .btn-row{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
 .presets{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
@@ -140,7 +140,8 @@ input:focus{outline:none;border-color:#00e5ff}
 .sig-head{display:flex;justify-content:space-between;align-items:flex-start}
 .sig-name{color:#00e5ff;font-weight:bold;font-size:.95em;word-break:break-word}
 .sig-meta{color:#8899aa;font-size:.75em;font-family:monospace;margin-top:4px}
-.sig-actions{display:flex;gap:4px;flex:0 0 auto}
+.sig-note{color:#f9a825;font-size:.75em;margin-top:3px;font-style:italic}
+.sig-actions{display:flex;gap:4px;flex:0 0 auto;flex-wrap:wrap}
 .empty{color:#3a4a66;text-align:center;padding:30px 10px;font-size:.85em}
 .rec-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(10,14,23,.95);
   display:none;flex-direction:column;align-items:center;justify-content:center;
@@ -160,6 +161,14 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
 .th-val{min-width:55px;text-align:center;color:#00e5ff;font-family:monospace;font-weight:bold}
 .diag-box{background:#0a0e17;padding:15px;border-radius:8px;margin-top:10px;font-family:monospace;font-size:.85em;line-height:1.6}
 .diag-ok{color:#00b894}.diag-fail{color:#ff3d71}.diag-warn{color:#f9a825}
+#rssiGraph{width:100%;height:80px;background:#0a0e17;border-radius:8px;margin-top:10px}
+.modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;
+  background:rgba(0,0,0,.85);z-index:200;align-items:center;justify-content:center;padding:20px}
+.modal.active{display:flex}
+.modal-content{background:#151c2c;padding:20px;border-radius:12px;
+  max-width:500px;width:100%;max-height:80vh;overflow-y:auto}
+.hexbox{font-family:monospace;font-size:.75em;background:#0a0e17;padding:12px;
+  border-radius:6px;word-break:break-all;line-height:1.6;color:#0f0}
 </style></head><body>
 
 <div id="statusbar">
@@ -194,7 +203,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
     <div class="menu-item" onclick="go('diagnostic')" style="grid-column: span 2; background:#2a1a3a;">
       <span class="menu-icon">🧪</span>
       <span class="menu-label">Diagnostic Mode</span>
-      <span class="menu-sub">حالت عیب‌یابی جامع</span>
+      <span class="menu-sub">حالت عیب‌یابی</span>
     </div>
   </div>
 </div>
@@ -207,6 +216,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   <div class="card">
     <div class="row"><span class="label">اسم</span>
       <input type="text" id="recName" placeholder="درب پارکینگ" maxlength="30"></div>
+    <div class="row"><span class="label">یادداشت</span>
+      <input type="text" id="recNoteIn" placeholder="اختیاری" maxlength="60"></div>
     <div class="row"><span class="label">فرکانس</span>
       <input type="number" id="recFreq" step="0.01" value="433.92" min="240" max="930"></div>
     <div class="row"><span class="label">بیت‌ریت</span>
@@ -221,6 +232,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
       <input type="range" id="recTh" min="-110" max="-40" value="-85"
              oninput="document.getElementById('recThV').textContent=this.value">
       <span class="th-val" id="recThV">-85</span>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-ook" style="flex:1" onclick="autoThreshold()">⚙️ کالیبراسیون آستانه</button>
     </div>
     <button class="btn btn-primary" style="margin-top:10px" onclick="beginRecord()">🔴 شروع ضبط</button>
     <div class="hint">ریموت را ۲-۳ سانتی‌متر از آنتن فشار بده</div>
@@ -247,12 +261,13 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
     <div class="unit">MHz</div>
     <div class="rssi-bar"><div class="rssi-fill" id="anBar"></div></div>
     <div class="hint" id="anRssi">RSSI: --- dBm</div>
+    <canvas id="rssiGraph"></canvas>
+    <div class="hint">۶۰ نمونه اخیر</div>
   </div>
 
   <div class="card">
     <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📡 فرکانس‌های رایج ریموت</div>
     <div class="presets" id="presetList"></div>
-    <div class="hint" style="margin-top:8px">یک فرکانس انتخاب کن و ریموت را فشار بده</div>
   </div>
 
   <div class="card">
@@ -273,7 +288,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
       <input type="number" id="anTarget" step="0.01" value="433.92"></div>
     <button class="btn btn-green" style="width:100%;margin-top:6px"
             onclick="lockFreq()">🔒 قفل و رفتن به ضبط</button>
-    <div class="hint">فرکانس قفل‌شده در صفحه Read قرار می‌گیرد</div>
   </div>
 </div>
 
@@ -282,29 +296,23 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
     <button class="back" onclick="go('home')">←</button>
     <div class="title">🔊 SDR</div>
   </div>
-
   <div class="display">
     <span class="value" id="sdrFreq">---.--</span>
     <div class="unit">MHz</div>
     <div class="hint" id="sdrStatus">متوقف</div>
   </div>
-
   <div class="card">
     <div class="row"><span class="label">فرکانس</span>
       <input type="number" id="sdrFreqInput" step="0.01" value="433.92" min="240" max="930">
       <button class="btn btn-green" style="flex:0 0 auto;padding:10px 14px"
               onclick="setSdrFreq()">تنظیم</button></div>
     <button class="btn btn-primary" id="sdrBtn" onclick="toggleSdr()" style="margin-top:8px">▶ پخش صدا</button>
-    <div class="hint" style="margin-top:8px">روی فرکانس مکالمه یا صدا تنظیم کن و پخش را بزن</div>
   </div>
-
   <div class="card">
     <div class="row"><span class="label">اسکن صوتی</span></div>
     <button class="btn btn-ook" style="width:100%;margin-top:6px"
             onclick="send('SDR_SCAN')">🔍 پیدا کردن سیگنال صوتی</button>
-    <div class="hint">اتوماتیک فرکانس‌ها را چک می‌کند و روی قوی‌ترین توقف می‌کند</div>
   </div>
-
   <div class="card">
     <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📻 فرکانس‌های رایج صوتی</div>
     <div class="presets">
@@ -321,28 +329,22 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
 <div id="sc-diagnostic" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
-    <div class="title">🧪 Diagnostic Mode</div>
+    <div class="title">🧪 Diagnostic</div>
   </div>
   <div class="card">
     <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">🔬 تست جامع</div>
-    <button class="btn btn-primary" style="margin-top:6px" onclick="startDiagnostic()">▶ شروع تست عیب‌یابی</button>
-    <div class="diag-box" id="diagOutput">
-      <div>آماده برای شروع...</div>
-    </div>
+    <button class="btn btn-primary" onclick="startDiagnostic()">▶ شروع تست</button>
+    <div class="diag-box" id="diagOutput"><div>آماده...</div></div>
   </div>
   <div class="card">
     <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📡 تست SPI</div>
-    <button class="btn btn-ook" style="width:100%" onclick="send('DIAG_SPI')">📡 خواندن رجیستر نسخه</button>
-    <div class="diag-box" id="spiOutput">
-      <div>در انتظار...</div>
-    </div>
+    <button class="btn btn-ook" style="width:100%" onclick="send('DIAG_SPI')">📡 خواندن رجیستر</button>
+    <div class="diag-box" id="spiOutput"><div>در انتظار...</div></div>
   </div>
   <div class="card">
     <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📊 تست RSSI</div>
     <button class="btn btn-green" style="width:100%" onclick="send('DIAG_RSSI')">📊 نمایش RSSI خام</button>
-    <div class="diag-box" id="rssiOutput">
-      <div>در انتظار...</div>
-    </div>
+    <div class="diag-box" id="rssiOutput"><div>در انتظار...</div></div>
   </div>
 </div>
 
@@ -353,17 +355,48 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   <button class="rec-cancel" onclick="cancelRecord()">لغو</button>
 </div>
 
+<!-- Hex Modal -->
+<div class="modal" id="hexModal">
+  <div class="modal-content">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div style="color:#00e5ff;font-weight:bold" id="hexTitle">Hex View</div>
+      <button class="btn btn-stop" style="flex:0 0 auto;padding:6px 12px" onclick="closeHex()">بستن</button>
+    </div>
+    <div class="hexbox" id="hexContent">...</div>
+  </div>
+</div>
+
 <script>
 let ws, sdrWs, audioCtx=null, audioProcessor=null, sdrQueue=[], sdrPhase=0;
 let scanning=false, sdrOn=false, diagRunning=false;
 const commonFreqs=[315.00,390.00,418.00,430.00,433.05,433.42,433.92,434.42,868.35,915.00];
+let rssiHistory=[];
 
 window.onload=()=>{
   const pl=document.getElementById('presetList');
   pl.innerHTML=commonFreqs.map(f=>
     '<button class="btn-preset" onclick="pickPreset('+f+')">'+f.toFixed(2)+'</button>'
   ).join('');
+  drawGraph();
 };
+
+function drawGraph(){
+  const c=document.getElementById('rssiGraph');
+  if(!c) return;
+  const w=c.width=c.offsetWidth*2, h=c.height=160;
+  const ctx=c.getContext('2d');
+  ctx.clearRect(0,0,w,h);
+  ctx.strokeStyle='#1e2a45'; ctx.lineWidth=2;
+  for(let i=0;i<=4;i++){const y=i*h/4; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke();}
+  if(rssiHistory.length<2) return;
+  ctx.strokeStyle='#00e5ff'; ctx.lineWidth=3; ctx.beginPath();
+  for(let i=0;i<rssiHistory.length;i++){
+    const x=i*w/59;
+    const y=h-((rssiHistory[i]+110)/70)*h;
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+}
 
 function connect(){
   ws=new WebSocket('ws://'+location.host+'/ws');
@@ -378,6 +411,9 @@ function connect(){
         bar.style.background=m.rssi>-70?'#00e5ff':m.rssi>-85?'#f9a825':'#ff3d71';
         document.getElementById('anRssi').textContent='RSSI: '+m.rssi+' dBm';
         setSbFreq(m.freq); setSbRssi(m.rssi);
+        rssiHistory.push(m.rssi);
+        if(rssiHistory.length>60) rssiHistory.shift();
+        drawGraph();
       }
       if(m.type==='SIGNALS') renderList(m.list);
       if(m.type==='STATUS') setSbState(m.msg);
@@ -392,15 +428,17 @@ function connect(){
       }
       if(m.type==='SDR_FREQ'){document.getElementById('sdrFreq').textContent=m.freq.toFixed(2);}
       if(m.type==='SDR_STATUS'){document.getElementById('sdrStatus').textContent=m.msg;}
-      if(m.type==='DIAG_OUTPUT'){
-        document.getElementById('diagOutput').innerHTML = m.html;
-        diagRunning = false;
+      if(m.type==='DIAG_OUTPUT'){document.getElementById('diagOutput').innerHTML=m.html;diagRunning=false;}
+      if(m.type==='DIAG_SPI_OUTPUT'){document.getElementById('spiOutput').innerHTML=m.html;}
+      if(m.type==='DIAG_RSSI_OUTPUT'){document.getElementById('rssiOutput').innerHTML=m.html;}
+      if(m.type==='HEX'){
+        document.getElementById('hexTitle').textContent='Hex - '+m.name;
+        document.getElementById('hexContent').textContent=m.hex;
+        document.getElementById('hexModal').classList.add('active');
       }
-      if(m.type==='DIAG_SPI_OUTPUT'){
-        document.getElementById('spiOutput').innerHTML = m.html;
-      }
-      if(m.type==='DIAG_RSSI_OUTPUT'){
-        document.getElementById('rssiOutput').innerHTML = m.html;
+      if(m.type==='THRESHOLD_SET'){
+        document.getElementById('recTh').value=m.value;
+        document.getElementById('recThV').textContent=m.value;
       }
     }catch(x){}
   };
@@ -435,22 +473,26 @@ function setBitrateUI(br){
   else if(br==9.6){const e=document.getElementById('rbr96'); if(e)e.classList.add('active');}
 }
 
-function toggleManchester(){
-  send('TOGGLE_MANCHESTER');
-}
+function toggleManchester(){ send('TOGGLE_MANCHESTER'); }
 function setManchesterUI(on){
   const b=document.getElementById('manch');
   if(b) b.textContent='Manchester: '+(on?'روشن':'خاموش');
   if(b) b.className = on ? 'btn-preset active' : 'btn-preset';
 }
 
+function autoThreshold(){
+  send('AUTO_THRESHOLD');
+  setSbState('کالیبراسیون...');
+}
+
 function beginRecord(){
   const n=(document.getElementById('recName').value||'').trim()||('sig_'+Date.now());
+  const note=(document.getElementById('recNoteIn').value||'').trim();
   const f=parseFloat(document.getElementById('recFreq').value||'433.92');
   const th=parseInt(document.getElementById('recTh').value);
   if(f<240||f>930){ alert('فرکانس نامعتبر'); return; }
   send('THRESH:'+th);
-  send('REC:'+f+':'+n);
+  send('REC:'+f+':'+n+':'+note);
   document.getElementById('recOverlay').classList.add('active');
   document.getElementById('recLiveRssi').textContent='--- dBm';
   document.getElementById('recStatus').textContent='آماده ضبط — ریموت را فشار بده';
@@ -467,6 +509,7 @@ function toggleScan(){
     const s=parseFloat(document.getElementById('anStart').value);
     const e=parseFloat(document.getElementById('anEnd').value);
     const st=parseFloat(document.getElementById('anStep').value);
+    rssiHistory=[];
     send('SCAN_RANGE:'+s+':'+e+':'+st);
     b.textContent='⏹ توقف';
   } else { send('STOP'); b.textContent='▶ شروع اسکن'; }
@@ -486,13 +529,22 @@ function renderList(list){
   el.innerHTML=list.map(s=>
     '<div class="sig"><div class="sig-head"><div style="flex:1">'+
     '<div class="sig-name">'+s.name+'</div>'+
-    '<div class="sig-meta">'+s.freq+' MHz • '+s.len+' bytes</div></div>'+
-    '<div class="sig-actions">'+
-    '<button class="btn btn-green" style="padding:8px 12px" onclick="playSig('+s.id+')">📡</button>'+
-    '<button class="btn btn-stop" style="padding:8px 12px" onclick="delSig('+s.id+')">🗑</button>'+
-    '</div></div></div>').join('');
+    '<div class="sig-meta">'+s.freq+' MHz • '+s.len+' bytes</div>'+
+    (s.note?'<div class="sig-note">📝 '+s.note+'</div>':'')+
+    '</div></div>'+
+    '<div class="sig-actions" style="margin-top:8px">'+
+    '<button class="btn btn-green" style="padding:6px 10px;font-size:.75em" onclick="playSig('+s.id+',1,0)">📡 ۱x</button>'+
+    '<button class="btn btn-green" style="padding:6px 10px;font-size:.75em" onclick="playSig('+s.id+',3,200)">📡 ۳x</button>'+
+    '<button class="btn btn-green" style="padding:6px 10px;font-size:.75em" onclick="playSig('+s.id+',5,300)">📡 ۵x</button>'+
+    '<button class="btn btn-ook" style="padding:6px 10px;font-size:.75em" onclick="autoPlay('+s.id+')">🎯</button>'+
+    '<button class="btn btn-primary" style="padding:6px 10px;font-size:.75em;flex:0 0 auto;width:auto" onclick="showHex('+s.id+')">🔢</button>'+
+    '<button class="btn btn-stop" style="padding:6px 10px;font-size:.75em" onclick="delSig('+s.id+')">🗑</button>'+
+    '</div></div>').join('');
 }
-function playSig(id){ send('PLAY:'+id); }
+function playSig(id,count,delay){ send('PLAY_N:'+id+':'+count+':'+delay); }
+function autoPlay(id){ send('AUTO_PLAY:'+id); }
+function showHex(id){ send('GET_HEX:'+id); }
+function closeHex(){ document.getElementById('hexModal').classList.remove('active'); }
 function delSig(id){ if(confirm('حذف شود؟')) send('DEL:'+id); }
 function clearAll(){ if(confirm('همه حذف شوند؟')) send('CLEAR_ALL'); }
 
@@ -508,13 +560,10 @@ function toggleSdr(){
   if(!sdrOn){
     audioCtx=new (window.AudioContext||window.webkitAudioContext)();
     if(audioCtx.state==='suspended') audioCtx.resume();
-    sdrQueue=[];
-    sdrPhase=0;
-
+    sdrQueue=[]; sdrPhase=0;
     const bufSize=1024;
     audioProcessor=audioCtx.createScriptProcessor(bufSize,1,1);
     const ratio=8000/audioCtx.sampleRate;
-
     audioProcessor.onaudioprocess=(e)=>{
       const out=e.outputBuffer.getChannelData(0);
       for(let i=0;i<out.length;i++){
@@ -525,27 +574,21 @@ function toggleSdr(){
       }
     };
     audioProcessor.connect(audioCtx.destination);
-
     sdrWs=new WebSocket('ws://'+location.host+'/sdr');
     sdrWs.binaryType='arraybuffer';
     sdrWs.onopen=()=>{ send('SDR_START'); };
     sdrWs.onmessage=(e)=>{
       const arr=new Uint8Array(e.data);
-      for(let i=0;i<arr.length;i++){
-        const v=(arr[i]-128)/128;
-        sdrQueue.push(v);
-      }
+      for(let i=0;i<arr.length;i++){ sdrQueue.push((arr[i]-128)/128); }
       while(sdrQueue.length>8192) sdrQueue.shift();
     };
     sdrWs.onclose=()=>{ if(sdrOn) setTimeout(()=>toggleSdr(),500); };
-
     sdrOn=true;
     document.getElementById('sdrBtn').textContent='⏹ توقف صدا';
     document.getElementById('sdrBtn').className='btn btn-danger';
     document.getElementById('sdrStatus').textContent='در حال پخش...';
   } else {
-    sdrOn=false;
-    send('SDR_STOP');
+    sdrOn=false; send('SDR_STOP');
     if(sdrWs){ try{sdrWs.close();}catch(x){} sdrWs=null; }
     if(audioProcessor){ try{audioProcessor.disconnect();}catch(x){} audioProcessor=null; }
     if(audioCtx){ try{audioCtx.close();}catch(x){} audioCtx=null; }
@@ -565,19 +608,17 @@ function quickSdr(f){
   document.getElementById('sdrFreqInput').value=f.toFixed(2);
   setSdrFreq();
 }
-
 function startDiagnostic(){
   if(diagRunning) return;
   diagRunning = true;
   document.getElementById('diagOutput').innerHTML = '<div>در حال اجرا...</div>';
   send('DIAG_START');
 }
-
 connect();
 </script></body></html>
 )HTML";
 
-// ==================== Forward Declarations ====================
+// ==================== Forward ====================
 byte readRssiReg();
 int  readRssi();
 byte readRegister(byte reg);
@@ -586,6 +627,7 @@ void sendList();
 void reinitRadio();
 void finishRecording();
 void runDiagnosticStep();
+void performAutoThreshold();
 
 // ==================== WS Helpers ====================
 void sendStatus(const String& m){
@@ -597,7 +639,12 @@ void sendList(){
   for(int i=0;i<signalCount;i++){
     if(i)out+=",";
     String nm=signals[i].name; nm.replace("\"","");
+    String nt="";
+    char np[24]; snprintf(np,sizeof(np),"/n%d.txt",signals[i].id);
+    File nf=LittleFS.open(np,"r");
+    if(nf){ nt=nf.readString(); nf.close(); nt.replace("\"",""); }
     out+="{\"id\":"+String(signals[i].id)+",\"name\":\""+nm+"\",";
+    out+="\"note\":\""+nt+"\",";
     out+="\"freq\":"+String(signals[i].freq,2)+",\"len\":"+String(signals[i].len)+"}";
   }
   out+="]}";
@@ -612,7 +659,7 @@ void sendSettings(){
   out+="}}"; ws.textAll(out);
 }
 
-// ==================== Direct Register Read ====================
+// ==================== Direct Register ====================
 byte readRegister(byte reg) {
   SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_CS, LOW);
@@ -626,89 +673,79 @@ byte readRegister(byte reg) {
   return result;
 }
 
+// ==================== Auto Threshold ====================
+void performAutoThreshold() {
+  long sum = 0;
+  int n = 0;
+  for(int i=0;i<30;i++){
+    byte raw = readRssiReg();
+    int dbm = (int)(0.5f*raw)-131;
+    sum += dbm;
+    n++;
+    delay(30);
+  }
+  int baseline = sum / n;
+  int newTh = baseline + 8;
+  if(newTh > -40) newTh = -40;
+  if(newTh < -110) newTh = -110;
+  cfgThreshold = newTh;
+  savePrefs();
+  char buf[64];
+  snprintf(buf, sizeof(buf), "{\"type\":\"THRESHOLD_SET\",\"value\":%d}", newTh);
+  ws.textAll(buf);
+  snprintf(buf, sizeof(buf), "⚙️ baseline: %d dBm → threshold: %d dBm", baseline, newTh);
+  sendStatus(String(buf));
+}
+
 // ==================== Diagnostic ====================
 void sendDiagOutput(String html) {
-  html.replace("\"", "\\\"");
-  html.replace("\n", " ");
+  html.replace("\"", "\\\""); html.replace("\n", " ");
   ws.textAll("{\"type\":\"DIAG_OUTPUT\",\"html\":\"" + html + "\"}");
 }
-
 void sendSpiOutput(String html) {
-  html.replace("\"", "\\\"");
-  html.replace("\n", " ");
+  html.replace("\"", "\\\""); html.replace("\n", " ");
   ws.textAll("{\"type\":\"DIAG_SPI_OUTPUT\",\"html\":\"" + html + "\"}");
 }
-
 void sendRssiOutput(String html) {
-  html.replace("\"", "\\\"");
-  html.replace("\n", " ");
+  html.replace("\"", "\\\""); html.replace("\n", " ");
   ws.textAll("{\"type\":\"DIAG_RSSI_OUTPUT\",\"html\":\"" + html + "\"}");
 }
-
 void runDiagnosticStep() {
   if (!diagMode) return;
   String out = "";
-  
   if (diagStep == 0) {
     out += "<div>🔍 <b>مرحله ۱: تست SPI</b></div>";
     byte ver = readRegister(0x00);
     byte ver2 = readRegister(0x31);
     char buf[64];
-    snprintf(buf, sizeof(buf), "<div>رجیستر 0x00: 0x%02X</div><div>رجیستر 0x31: 0x%02X</div>", ver, ver2);
+    snprintf(buf, sizeof(buf), "<div>0x00: 0x%02X | 0x31: 0x%02X</div>", ver, ver2);
     out += buf;
-    if (ver == 0x08 || ver2 == 0x08) {
-      out += "<div class='diag-ok'>✅ SPI به درستی کار می‌کند</div>";
-    } else {
-      out += "<div class='diag-fail'>❌ خطا در SPI! اتصالات را بررسی کنید</div>";
-    }
+    if (ver == 0x08 || ver2 == 0x08) out += "<div class='diag-ok'>✅ SPI OK</div>";
+    else out += "<div class='diag-fail'>❌ SPI FAIL</div>";
     diagStep++;
-  }
-  else if (diagStep == 1) {
-    out += "<div>🔍 <b>مرحله ۲: تست RSSI</b></div>";
+  } else if (diagStep == 1) {
     int raw = readRssiReg();
     int dbm = readRssi();
     char buf[64];
-    snprintf(buf, sizeof(buf), "<div>RSSI خام: %d</div><div>RSSI dBm: %d</div>", raw, dbm);
+    snprintf(buf, sizeof(buf), "<div>RSSI: %d -> %d dBm</div>", raw, dbm);
     out += buf;
-    if (raw == 0 || raw == 255) {
-      out += "<div class='diag-fail'>❌ RSSI غیرمعتبر! احتمالاً آنتن یا تغذیه مشکل دارد</div>";
-    } else if (dbm > -30) {
-      out += "<div class='diag-warn'>⚠️ RSSI بسیار قوی! احتمالاً نویز یا سیگنال تداخلی</div>";
-    } else {
-      out += "<div class='diag-ok'>✅ RSSI در محدوده طبیعی است</div>";
-    }
+    if (raw == 0 || raw == 255) out += "<div class='diag-fail'>❌ RSSI نامعتبر</div>";
+    else out += "<div class='diag-ok'>✅ RSSI معتبر</div>";
     diagStep++;
-  }
-  else if (diagStep == 2) {
-    out += "<div>🔍 <b>مرحله ۳: تست فرکانس</b></div>";
-    radio.setFrequency(433.92);
-    radio.startListening();
-    delay(50);
+  } else if (diagStep == 2) {
+    radio.setFrequency(433.92); radio.startListening(); delay(50);
     int r1 = readRssi();
-    radio.setFrequency(315.00);
-    radio.startListening();
-    delay(50);
+    radio.setFrequency(315.00); radio.startListening(); delay(50);
     int r2 = readRssi();
     char buf[80];
-    snprintf(buf, sizeof(buf), "<div>433.92 MHz: %d dBm</div><div>315.00 MHz: %d dBm</div>", r1, r2);
+    snprintf(buf, sizeof(buf), "<div>433.92 MHz: %d dBm</div><div>315 MHz: %d dBm</div>", r1, r2);
     out += buf;
-    out += "<div class='diag-ok'>✅ تنظیم فرکانس انجام شد</div>";
-    diagStep++;
-  }
-  else if (diagStep == 3) {
-    out += "<div>🔍 <b>مرحله ۴: تست ضبط کوتاه</b></div>";
-    out += "<div>لطفاً دکمه ریموت را فشار دهید...</div>";
-    diagStep++;
-    sendDiagOutput(out);
-    return;
-  }
-  else if (diagStep == 4) {
+    out += "<div class='diag-ok'>✅ تنظیم فرکانس OK</div>";
+    diagStep = 4;
+  } else if (diagStep == 4) {
     out += "<div class='diag-ok'>✅ تست کامل شد</div>";
-    out += "<div>برای ضبط واقعی به صفحه Read بروید</div>";
     diagMode = false;
-    diagComplete = true;
   }
-  
   sendDiagOutput(out);
 }
 
@@ -724,8 +761,14 @@ bool loadSigFile(int id,uint8_t* d,uint16_t* n){
   *n=f.read(d,2048); f.close(); return *n>0;
 }
 void delSigFile(int id){
-  char p[24]; snprintf(p,sizeof(p),"/s%d.bin",id);
-  LittleFS.remove(p);
+  char p[24]; snprintf(p,sizeof(p),"/s%d.bin",id); LittleFS.remove(p);
+  char np[24]; snprintf(np,sizeof(np),"/n%d.txt",id); LittleFS.remove(np);
+}
+void saveNote(int id,const char* note){
+  if(!note || !*note) return;
+  char p[24]; snprintf(p,sizeof(p),"/n%d.txt",id);
+  File f=LittleFS.open(p,"w"); if(!f)return;
+  f.print(note); f.close();
 }
 void loadIndex(){
   signalCount=0;
@@ -783,10 +826,8 @@ void reinitRadio(){
   Serial.println("OK");
 }
 
-// ==================== RSSI Direct SPI ====================
-byte readRssiReg(){
-  return readRegister(0x26);
-}
+// ==================== RSSI ====================
+byte readRssiReg(){ return readRegister(0x26); }
 int readRssi(){
   byte maxR=0;
   for(int i=0;i<3;i++){
@@ -815,10 +856,8 @@ void doSdr(){
   unsigned long now=micros();
   if(now-lastSdrSample<SDR_SAMPLE_INTERVAL_US) return;
   lastSdrSample=now;
-
   byte raw=readRssiReg();
   sdrBuffer[sdrBufIdx++]=raw;
-
   if(sdrBufIdx>=SDR_BUF_SIZE){
     sdrSocket.binaryAll(sdrBuffer, SDR_BUF_SIZE);
     sdrBufIdx=0;
@@ -826,11 +865,12 @@ void doSdr(){
 }
 
 // ==================== Recording ====================
-void startRecording(float freq,const char* name){
+void startRecording(float freq,const char* name,const char* note){
   recState=1;
   recLen=0; recBit=0; recBitCnt=0;
   recStartMs=millis(); recLastMs=millis();
   strncpy(recName,name,NAME_LEN-1); recName[NAME_LEN-1]=0;
+  strncpy(recNote,note,63); recNote[63]=0;
   recFreq=freq;
   radio.setFrequency(recFreq);
   radio.startListening();
@@ -845,35 +885,34 @@ void finishRecording(){
   if(signalCount>=MAX_SIGNALS){ sendStatus("❌ حافظه پر است"); return; }
   int id=nextId++;
   saveSigFile(id,recBuf,recLen);
+  saveNote(id, recNote);
   Signal& s=signals[signalCount++];
   s.id=id; s.freq=recFreq; s.len=recLen;
   strncpy(s.name,recName,NAME_LEN-1); s.name[NAME_LEN-1]=0;
   saveIndex();
-  sendStatus("✅ ذخیره شد: "+String(recLen)+" bytes");
+  char buf[80];
+  snprintf(buf,sizeof(buf),"✅ ذخیره شد: %d bytes",recLen);
+  sendStatus(String(buf));
   sendList();
 }
 
 void doRecord(){
   if(recState==0) return;
-
   if(recState==1 && (millis()-recStartMs>REC_START_TIMEOUT_MS)){
     sendStatus("❌ سیگنالی در ۵ ثانیه دریافت نشد");
     recState=0;
     ws.textAll("{\"type\":\"LIVE\",\"rssi\":0,\"state\":\"timeout\"}");
     return;
   }
-
   int rssi=readRssi();
   bool sig=(rssi>cfgThreshold);
   ws.textAll("{\"type\":\"LIVE\",\"rssi\":"+String(rssi)+
              ",\"state\":\""+String(recState==1?"در انتظار سیگنال":"در حال ضبط")+"\"}");
-
   if(recState==1){
     if(sig){ recState=2; recLastMs=millis(); }
     delayMicroseconds(150);
     return;
   }
-
   if(sig){
     recBit |= (0x80>>recBitCnt);
     recLastMs=millis();
@@ -891,22 +930,73 @@ void doRecord(){
 }
 
 // ==================== Replay ====================
-void replaySignal(int id){
+void replaySignalN(int id, int count, int delayMs){
   for(int i=0;i<signalCount;i++){
     if(signals[i].id==id){
       static uint8_t buf[2048]; uint16_t len;
       if(!loadSigFile(id,buf,&len)){ sendStatus("❌ فایل یافت نشد"); return; }
-      radio.setFrequency(signals[i].freq);
-      radio.turnOn();
-      delay(20);
-      radio.sendPacket((uint8_t)len,buf);
-      delay(60);
+      for(int n=0;n<count;n++){
+        radio.setFrequency(signals[i].freq);
+        radio.turnOn();
+        delay(20);
+        radio.sendPacket((uint8_t)len,buf);
+        delay(delayMs > 0 ? delayMs : 50);
+      }
       radio.startListening();
-      sendStatus("📡 ارسال شد: "+String(signals[i].name));
+      char b2[80];
+      snprintf(b2,sizeof(b2),"📡 ارسال %dx: %s",count,signals[i].name);
+      sendStatus(String(b2));
       return;
     }
   }
   sendStatus("❌ یافت نشد");
+}
+
+void autoPlaySignal(int id){
+  for(int i=0;i<signalCount;i++){
+    if(signals[i].id==id){
+      static uint8_t buf[2048]; uint16_t len;
+      if(!loadSigFile(id,buf,&len)){ sendStatus("❌ فایل یافت نشد"); return; }
+      float origBr = cfgBitrate;
+      float rates[] = {2.4, 4.8, 9.6};
+      for(int r=0;r<3;r++){
+        cfgBitrate = rates[r];
+        radio.setBaudRate(cfgBitrate);
+        radio.setFrequency(signals[i].freq);
+        radio.turnOn();
+        delay(30);
+        radio.sendPacket((uint8_t)len,buf);
+        delay(80);
+        char b2[80];
+        snprintf(b2,sizeof(b2),"🎯 ارسال %.1f kbps",rates[r]);
+        sendStatus(String(b2));
+        delay(150);
+      }
+      cfgBitrate = origBr;
+      radio.setBaudRate(cfgBitrate);
+      radio.startListening();
+      sendStatus("✅ Auto-play کامل شد");
+      return;
+    }
+  }
+}
+
+void showHexSignal(int id){
+  for(int i=0;i<signalCount;i++){
+    if(signals[i].id==id){
+      static uint8_t buf[2048]; uint16_t len;
+      if(!loadSigFile(id,buf,&len)){ sendStatus("❌ فایل یافت نشد"); return; }
+      String hex = "";
+      for(uint16_t i=0;i<len;i++){
+        char b[4]; snprintf(b,sizeof(b),"%02X ",buf[i]);
+        hex += b;
+        if((i+1)%16 == 0) hex += "\n";
+      }
+      String nm = signals[i].name; nm.replace("\"","");
+      ws.textAll("{\"type\":\"HEX\",\"name\":\""+nm+"\",\"hex\":\""+hex+"\"}");
+      return;
+    }
+  }
 }
 
 void deleteSignal(int id){
@@ -930,7 +1020,7 @@ void clearAllSignals(){
   sendStatus("🗑 همه حذف شدند");
 }
 
-// ==================== WebSocket Control ====================
+// ==================== WebSocket ====================
 void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,uint8_t* d,size_t l){
   if(t!=WS_EVT_DATA)return;
   String cmd; cmd.reserve(l+1);
@@ -941,8 +1031,7 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
     scanStart=300; scanEnd=928; scanStep=0.5; currentFreq=scanStart;
     sendStatus("در حال اسکن..."); }
   else if(cmd.startsWith("SCAN_RANGE:")){
-    int p1=cmd.indexOf(':',11);
-    int p2=cmd.indexOf(':',p1+1);
+    int p1=cmd.indexOf(':',11); int p2=cmd.indexOf(':',p1+1);
     if(p1>0 && p2>0){
       scanStart=cmd.substring(11,p1).toFloat();
       scanEnd=cmd.substring(p1+1,p2).toFloat();
@@ -950,33 +1039,49 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
       if(scanStep<0.05) scanStep=0.05;
       currentFreq=scanStart;
       scanning=true; sdrActive=false; recState=0;
-      sendStatus("اسکن از "+String(scanStart)+" تا "+String(scanEnd));
+      sendStatus("اسکن...");
     }
   }
   else if(cmd=="STOP"){ scanning=false; if(recState)finishRecording(); sendStatus("متوقف"); }
   else if(cmd=="LIST"){ sendList(); }
   else if(cmd=="GET_SETTINGS"){ sendSettings(); }
   else if(cmd=="CLEAR_ALL"){ clearAllSignals(); }
-  else if(cmd=="TOGGLE_OOK"){
-    cfgOOK=!cfgOOK; savePrefs(); reinitRadio();
-    ws.textAll("{\"type\":\"OOK\",\"on\":"+String(cfgOOK?"true":"false")+"}");
-  }
+  else if(cmd=="AUTO_THRESHOLD"){ performAutoThreshold(); }
   else if(cmd=="TOGGLE_MANCHESTER"){
     cfgManchester=!cfgManchester; savePrefs(); reinitRadio();
     sendSettings();
     sendStatus(cfgManchester?"Manchester روشن":"Manchester خاموش");
   }
   else if(cmd.startsWith("REC:")){
-    int c1=cmd.indexOf(':',4);
-    if(c1>0){
-      float f=cmd.substring(4,c1).toFloat();
-      String n=cmd.substring(c1+1);
+    // REC:freq:name:note
+    int p1=cmd.indexOf(':',4);
+    int p2=cmd.indexOf(':',p1+1);
+    if(p1>0 && p2>0){
+      float f=cmd.substring(4,p1).toFloat();
+      String n=cmd.substring(p1+1,p2);
+      String nt=cmd.substring(p2+1);
       if(f<240||f>930){ sendStatus("❌ فرکانس نامعتبر"); return; }
       scanning=false; sdrActive=false;
-      startRecording(f,n.c_str());
+      startRecording(f,n.c_str(),nt.c_str());
     }
   }
-  else if(cmd.startsWith("PLAY:")){ replaySignal(cmd.substring(5).toInt()); }
+  else if(cmd.startsWith("PLAY_N:")){
+    int p1=cmd.indexOf(':',7); int p2=cmd.indexOf(':',p1+1);
+    if(p1>0 && p2>0){
+      int id=cmd.substring(7,p1).toInt();
+      int cnt=cmd.substring(p1+1,p2).toInt();
+      int dl=cmd.substring(p2+1).toInt();
+      replaySignalN(id, cnt, dl);
+    }
+  }
+  else if(cmd.startsWith("AUTO_PLAY:")){
+    int id=cmd.substring(10).toInt();
+    autoPlaySignal(id);
+  }
+  else if(cmd.startsWith("GET_HEX:")){
+    int id=cmd.substring(8).toInt();
+    showHexSignal(id);
+  }
   else if(cmd.startsWith("DEL:")){ deleteSignal(cmd.substring(4).toInt()); }
   else if(cmd.startsWith("SET_BITRATE:")){
     float br=cmd.substring(12).toFloat();
@@ -995,9 +1100,7 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
   else if(cmd=="SDR_START"){
     scanning=false; recState=0;
     sdrActive=true; sdrBufIdx=0; lastSdrSample=micros();
-    radio.setFrequency(cfgFreq);
-    radio.startListening();
-    delay(30);
+    radio.setFrequency(cfgFreq); radio.startListening(); delay(30);
     ws.textAll("{\"type\":\"SDR_STATUS\",\"msg\":\"در حال پخش صدا\"}");
     ws.textAll("{\"type\":\"SDR_FREQ\",\"freq\":"+String(cfgFreq,2)+"}");
   }
@@ -1028,9 +1131,7 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
     ws.textAll(buf);
   }
   else if(cmd=="DIAG_START"){
-    diagMode = true;
-    diagStep = 0;
-    diagComplete = false;
+    diagMode = true; diagStep = 0; diagComplete = false;
     runDiagnosticStep();
   }
   else if(cmd=="DIAG_SPI"){
@@ -1039,11 +1140,8 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
     char buf[160];
     snprintf(buf, sizeof(buf), "<div>0x00 = 0x%02X</div><div>0x31 = 0x%02X</div>", v1, v2);
     String s = String(buf);
-    if(v1 == 0x08 || v2 == 0x08) {
-      s += "<div class='diag-ok'>✅ SPI OK</div>";
-    } else {
-      s += "<div class='diag-fail'>❌ SPI FAIL</div>";
-    }
+    if(v1 == 0x08 || v2 == 0x08) s += "<div class='diag-ok'>✅ SPI OK</div>";
+    else s += "<div class='diag-fail'>❌ SPI FAIL</div>";
     sendSpiOutput(s);
   }
   else if(cmd=="DIAG_RSSI"){
@@ -1052,24 +1150,19 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
     char buf[160];
     snprintf(buf, sizeof(buf), "<div>RSSI خام: %d</div><div>dBm: %d</div>", raw, dbm);
     String s = String(buf);
-    if (raw == 0 || raw == 255) {
-      s += "<div class='diag-fail'>❌ مقدار نامعتبر</div>";
-    } else {
-      s += "<div class='diag-ok'>✅ مقدار معتبر</div>";
-    }
+    if (raw == 0 || raw == 255) s += "<div class='diag-fail'>❌ نامعتبر</div>";
+    else s += "<div class='diag-ok'>✅ معتبر</div>";
     sendRssiOutput(s);
   }
 }
 
-// ==================== SDR WebSocket ====================
-void onSdrWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,uint8_t* d,size_t l){
-  // send only
-}
+// ==================== SDR WS ====================
+void onSdrWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,uint8_t* d,size_t l){}
 
 // ==================== Setup / Loop ====================
 void setup(){
   Serial.begin(115200); delay(500);
-  Serial.println("\n=== Si4432 Pro (Analyzer + SDR + Diagnostic) ===");
+  Serial.println("\n=== Si4432 Pro Advanced ===");
 
   if(!LittleFS.begin(true)) Serial.println("FS failed");
   loadIndex();
@@ -1082,7 +1175,6 @@ void setup(){
 
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
-
   sdrSocket.onEvent(onSdrWsEvent);
   server.addHandler(&sdrSocket);
 
@@ -1104,25 +1196,6 @@ void loop(){
   } else {
     if(scanning) doScan();
     if(recState) doRecord();
-    if(diagMode && diagStep == 3) {
-      static unsigned long lastDiagCheck = 0;
-      if(millis() - lastDiagCheck > 2000) {
-        lastDiagCheck = millis();
-        int rssi = readRssi();
-        String out = "<div>🔍 <b>مرحله ۴: تست ضبط کوتاه</b></div>";
-        if(rssi > cfgThreshold) {
-          out += "<div class='diag-ok'>✅ سیگنال شناسایی شد!</div>";
-        } else {
-          out += "<div class='diag-warn'>⚠️ سیگنالی شناسایی نشد</div>";
-        }
-        char buf[64];
-        snprintf(buf, sizeof(buf), "<div>آستانه: %d dBm</div><div>RSSI: %d dBm</div>", cfgThreshold, rssi);
-        out += buf;
-        sendDiagOutput(out);
-        diagStep = 4;
-        runDiagnosticStep();
-      }
-    }
     delay(1);
   }
 }
