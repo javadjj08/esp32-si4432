@@ -1,5 +1,5 @@
 /*
- * Si4432 Pro - Flipper Zero Style UI
+ * Si4432 Pro - RF Remote Tool with Analyzer + SDR
  * ESP32 DevKit V1 + Si4432
  * Library: nopnop2002/Arduino-SI4432
  */
@@ -24,22 +24,24 @@ const char* AP_PASS = "12345678";
 
 // ==================== Radio ====================
 Si4432 radio(PIN_CS, PIN_SDN, PIN_IRQ);
-
 Preferences prefs;
+
 float cfgFreq = 433.92;
 float cfgBitrate = 4.8;
 int   cfgPower = 20;
 int   cfgThreshold = -85;
-float scanStart = 430.0;
-float scanEnd   = 440.0;
-float scanStep  = 0.1;
 bool  cfgOOK = true;
 
 // ==================== State ====================
 bool scanning = false;
 bool diagnosticMode = false;
+bool sdrActive = false;
 int  recState = 0;
-float currentFreq = 430.0;
+float currentFreq = 433.92;
+float scanStart = 300.0;
+float scanEnd   = 928.0;
+float scanStep  = 0.5;
+
 float recFreq = 0;
 uint8_t  recBuf[2048];
 uint16_t recLen = 0;
@@ -52,15 +54,24 @@ char     recName[32] = "";
 #define REC_TIMEOUT_MS 300
 #define REC_START_TIMEOUT_MS 5000
 
+// ==================== Common RF Remote Frequencies ====================
+const float commonFreqs[] = {
+  315.00, 390.00, 418.00, 430.00, 433.05,
+  433.42, 433.92, 434.42, 868.35, 915.00
+};
+const int commonFreqsCount = 10;
+
+// ==================== SDR ====================
+#define SDR_BUF_SIZE 128
+uint8_t sdrBuffer[SDR_BUF_SIZE];
+int sdrBufIdx = 0;
+unsigned long lastSdrSample = 0;
+#define SDR_SAMPLE_INTERVAL_US 125  // ~8 kHz
+
 // ==================== Signals ====================
 #define MAX_SIGNALS 32
 #define NAME_LEN    32
-struct Signal {
-  uint16_t id;
-  float    freq;
-  uint16_t len;
-  char     name[NAME_LEN];
-};
+struct Signal { uint16_t id; float freq; uint16_t len; char name[NAME_LEN]; };
 Signal signals[MAX_SIGNALS];
 int signalCount = 0;
 int nextId = 1;
@@ -68,52 +79,44 @@ int nextId = 1;
 // ==================== Web ====================
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+AsyncWebSocket sdrSocket("/sdr");
 
-// ==================== HTML (Flipper Zero style) ====================
+// ==================== HTML ====================
 const char HTML[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="fa" dir="rtl"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>Si4432 Pro</title>
-<style>
+<title>Si4432 Pro</title><style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;user-select:none}
 body{font-family:Tahoma,sans-serif;background:#0a0e17;color:#e0e6ed;
      max-width:520px;margin:auto;min-height:100vh;display:flex;flex-direction:column}
-
 #statusbar{background:#0d1420;padding:8px 12px;display:flex;justify-content:space-between;
   align-items:center;border-bottom:1px solid #1e2a45;font-family:monospace;font-size:.8em;
   min-height:40px;position:sticky;top:0;z-index:10}
 #sbFreq{color:#00e5ff;font-weight:bold}
 #sbRssi{color:#f9a825}
 #sbState{color:#8899aa}
-
 .screen{display:none;padding:12px;flex:1;overflow-y:auto}
 .screen.active{display:block}
-
 .header{display:flex;align-items:center;gap:10px;margin-bottom:12px;
   padding-bottom:8px;border-bottom:1px solid #1e2a45}
 .back{background:transparent;color:#00e5ff;border:none;font-size:1.4em;
   cursor:pointer;padding:4px 12px;flex:0 0 auto}
-.title{font-size:1.05em;font-weight:bold;color:#e0e6ed}
-
+.title{font-size:1.05em;font-weight:bold;color:#e0e6ed;flex:1}
 .menu{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:8px 0}
 .menu-item{background:#151c2c;border:1px solid #1e2a45;border-radius:12px;
   padding:22px 10px;display:flex;flex-direction:column;align-items:center;
-  justify-content:center;gap:10px;cursor:pointer;transition:all .15s;
-  touch-action:manipulation;min-height:120px}
+  justify-content:center;gap:10px;cursor:pointer;transition:all .15s;min-height:120px}
 .menu-item:active{transform:scale(.96);background:#1e2a45}
 .menu-icon{font-size:2.4em;line-height:1}
 .menu-label{font-size:.85em;color:#e0e6ed;text-align:center;font-weight:600}
 .menu-sub{font-size:.7em;color:#7a8ba8;text-align:center;margin-top:2px}
-
-.card{background:#151c2c;border-radius:10px;padding:12px;margin-bottom:10px;
-  border:1px solid #1e2a45}
-.row{display:flex;gap:6px;margin-bottom:8px;align-items:center}
+.card{background:#151c2c;border-radius:10px;padding:12px;margin-bottom:10px;border:1px solid #1e2a45}
+.row{display:flex;gap:6px;margin-bottom:8px;align-items:center;flex-wrap:wrap}
 .label{color:#7a8ba8;font-size:.8em;min-width:65px}
 input[type=number],input[type=text]{flex:1;background:#0a0e17;color:#0f0;
   border:1px solid #1e2a45;border-radius:6px;padding:10px;font-family:monospace;
-  font-size:.9em;color-scheme:dark}
+  font-size:.9em;color-scheme:dark;min-width:100px}
 input:focus{outline:none;border-color:#00e5ff}
-
 .btn{padding:12px;border:none;border-radius:8px;font-size:.9em;font-weight:600;
   cursor:pointer;touch-action:manipulation;font-family:inherit}
 .btn:active{transform:scale(.97)}
@@ -123,11 +126,10 @@ input:focus{outline:none;border-color:#00e5ff}
 .btn-green{background:#00b894;color:#fff}
 .btn-ook{background:#f9a825;color:#000;flex:1}
 .btn-diag{background:#6c5ce7;color:#fff;flex:1}
-.btn-sm{padding:8px 12px;font-size:.8em}
-.btn-preset{background:#34495e;color:#fff;padding:10px 4px;font-size:.8em;flex:1;margin:0 2px}
+.btn-preset{background:#34495e;color:#fff;padding:8px 4px;font-size:.7em;flex:1;min-width:60px;margin:2px}
 .btn-preset.active{background:#00e5ff;color:#0a0e17}
-.btn-row{display:flex;gap:6px;margin-top:6px}
-
+.btn-row{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+.presets{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .display{background:#0a0e17;border-radius:10px;padding:20px;text-align:center;
   margin-bottom:10px;border:1px solid #1e2a45}
 .display .value{font-size:2.4em;font-weight:700;color:#00e5ff;
@@ -136,23 +138,12 @@ input:focus{outline:none;border-color:#00e5ff}
 .rssi-bar{height:8px;background:#1e2a45;border-radius:4px;margin-top:12px;overflow:hidden}
 .rssi-fill{height:100%;width:0;background:#00e5ff;transition:width .15s}
 .hint{text-align:center;color:#8899aa;font-size:.8em;margin-top:8px;font-family:monospace}
-
-.sig{background:#0a0e17;padding:12px;border-radius:8px;margin-bottom:8px;
-  border:1px solid #1e2a45}
+.sig{background:#0a0e17;padding:12px;border-radius:8px;margin-bottom:8px;border:1px solid #1e2a45}
 .sig-head{display:flex;justify-content:space-between;align-items:flex-start}
 .sig-name{color:#00e5ff;font-weight:bold;font-size:.95em;word-break:break-word}
 .sig-meta{color:#8899aa;font-size:.75em;font-family:monospace;margin-top:4px}
 .sig-actions{display:flex;gap:4px;flex:0 0 auto}
 .empty{color:#3a4a66;text-align:center;padding:30px 10px;font-size:.85em}
-
-.slider-row{display:flex;gap:10px;align-items:center}
-input[type=range]{flex:1;height:8px;-webkit-appearance:none;background:#1e2a45;
-  border-radius:4px;outline:none}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;
-  border-radius:50%;background:#00e5ff;cursor:pointer}
-.th-val{min-width:55px;text-align:center;color:#00e5ff;font-family:monospace;
-  font-weight:bold;font-size:1em}
-
 .rec-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(10,14,23,.95);
   display:none;flex-direction:column;align-items:center;justify-content:center;
   padding:20px;z-index:100}
@@ -164,6 +155,11 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
 .rec-status{color:#e0e6ed;margin-top:12px;font-size:1em;text-align:center}
 .rec-cancel{margin-top:24px;background:#2d3a54;color:#fff;padding:12px 40px;
   border:none;border-radius:8px;font-size:1em;font-family:inherit}
+input[type=range]{flex:1;height:8px;-webkit-appearance:none;background:#1e2a45;
+  border-radius:4px;outline:none;min-width:120px}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;
+  border-radius:50%;background:#00e5ff;cursor:pointer}
+.th-val{min-width:55px;text-align:center;color:#00e5ff;font-family:monospace;font-weight:bold}
 </style></head><body>
 
 <div id="statusbar">
@@ -172,34 +168,34 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   <span id="sbState">● idle</span>
 </div>
 
+<!-- HOME -->
 <div id="sc-home" class="screen active">
-  <div class="header">
-    <div class="title">📡 Si4432 Pro</div>
-  </div>
+  <div class="header"><div class="title">📡 Si4432 Pro</div></div>
   <div class="menu">
     <div class="menu-item" onclick="go('read')">
       <span class="menu-icon">📻</span>
       <span class="menu-label">Read</span>
-      <span class="menu-sub">ضبط سیگنال جدید</span>
+      <span class="menu-sub">ضبط سیگنال</span>
     </div>
     <div class="menu-item" onclick="go('saved')">
       <span class="menu-icon">📼</span>
       <span class="menu-label">Saved</span>
-      <span class="menu-sub">سیگنال‌های ذخیره‌شده</span>
+      <span class="menu-sub">سیگنال‌ها</span>
     </div>
     <div class="menu-item" onclick="go('analyzer')">
       <span class="menu-icon">🔍</span>
       <span class="menu-label">Analyzer</span>
-      <span class="menu-sub">تحلیلگر فرکانس</span>
+      <span class="menu-sub">یافتن فرکانس</span>
     </div>
-    <div class="menu-item" onclick="go('settings')">
-      <span class="menu-icon">⚙️</span>
-      <span class="menu-label">Settings</span>
-      <span class="menu-sub">تنظیمات ماژول</span>
+    <div class="menu-item" onclick="go('sdr')">
+      <span class="menu-icon">🔊</span>
+      <span class="menu-label">SDR</span>
+      <span class="menu-sub">شنیدن صدا</span>
     </div>
   </div>
 </div>
 
+<!-- READ -->
 <div id="sc-read" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
@@ -207,7 +203,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
   <div class="card">
     <div class="row"><span class="label">اسم</span>
-      <input type="text" id="recName" placeholder="مثلاً درب پارکینگ" maxlength="30"></div>
+      <input type="text" id="recName" placeholder="درب پارکینگ" maxlength="30"></div>
     <div class="row"><span class="label">فرکانس</span>
       <input type="number" id="recFreq" step="0.01" value="433.92" min="240" max="930"></div>
     <div class="row"><span class="label">بیت‌ریت</span>
@@ -221,20 +217,22 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
       <span class="th-val" id="recThV">-85</span>
     </div>
     <button class="btn btn-primary" style="margin-top:10px" onclick="beginRecord()">🔴 شروع ضبط</button>
-    <div class="hint">در فاصله ۲-۳ سانتی‌متر از آنتن، ریموت را ۳ بار فشار بده</div>
+    <div class="hint">ریموت را ۲-۳ سانتی‌متر از آنتن فشار بده</div>
   </div>
 </div>
 
+<!-- SAVED -->
 <div id="sc-saved" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
     <div class="title">📼 Saved</div>
-    <button class="btn btn-stop btn-sm" style="margin-right:auto;flex:0 0 auto"
+    <button class="btn btn-stop" style="flex:0 0 auto;padding:6px 10px;font-size:.8em"
             onclick="clearAll()">🗑 همه</button>
   </div>
-  <div id="savedList"><div class="empty">خالی — ابتدا از Read استفاده کن</div></div>
+  <div id="savedList"><div class="empty">خالی</div></div>
 </div>
 
+<!-- ANALYZER -->
 <div id="sc-analyzer" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
@@ -246,50 +244,78 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
     <div class="rssi-bar"><div class="rssi-fill" id="anBar"></div></div>
     <div class="hint" id="anRssi">RSSI: --- dBm</div>
   </div>
+
   <div class="card">
+    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📡 فرکانس‌های رایج ریموت</div>
+    <div class="presets" id="presetList"></div>
+    <div class="hint" style="margin-top:8px">یک فرکانس انتخاب کن و ریموت را فشار بده</div>
+  </div>
+
+  <div class="card">
+    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">🔎 اسکن کامل</div>
     <div class="row"><span class="label">شروع</span>
-      <input type="number" id="anStart" step="0.1" value="430.0"></div>
+      <input type="number" id="anStart" step="0.5" value="300.0"></div>
     <div class="row"><span class="label">پایان</span>
-      <input type="number" id="anEnd" step="0.1" value="440.0"></div>
+      <input type="number" id="anEnd" step="0.5" value="928.0"></div>
     <div class="row"><span class="label">گام</span>
-      <input type="number" id="anStep" step="0.05" value="0.1"></div>
+      <input type="number" id="anStep" step="0.05" value="0.5"></div>
     <div class="btn-row">
       <button class="btn btn-primary" id="anBtn" onclick="toggleScan()">▶ شروع اسکن</button>
     </div>
-    <button class="btn btn-diag" style="width:100%;margin-top:6px"
-            id="diagBtn" onclick="toggleDiag()">🔬 عیب‌یابی</button>
   </div>
+
   <div class="card">
-    <div class="row"><span class="label">هدف</span>
+    <div class="row"><span class="label">قفل روی</span>
       <input type="number" id="anTarget" step="0.01" value="433.92"></div>
-    <button class="btn btn-green" style="width:100%"
-            onclick="setTargetFreq()">📌 رفتن به این فرکانس</button>
+    <button class="btn btn-green" style="width:100%;margin-top:6px"
+            onclick="lockFreq()">🔒 قفل و رفتن به ضبط</button>
+    <div class="hint">فرکانس قفل‌شده در صفحه Read قرار می‌گیرد</div>
   </div>
 </div>
 
-<div id="sc-settings" class="screen">
+<!-- SDR -->
+<div id="sc-sdr" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
-    <div class="title">⚙️ Settings</div>
+    <div class="title">🔊 SDR</div>
   </div>
+
+  <div class="display">
+    <span class="value" id="sdrFreq">---.--</span>
+    <div class="unit">MHz</div>
+    <div class="hint" id="sdrStatus">متوقف</div>
+  </div>
+
   <div class="card">
     <div class="row"><span class="label">فرکانس</span>
-      <input type="number" id="setFreq" step="0.01" value="433.92"></div>
-    <div class="row"><span class="label">بیت‌ریت</span>
-      <input type="number" id="setBitrate" step="0.1" value="4.8"></div>
-    <div class="row"><span class="label">توان</span>
-      <input type="number" id="setPower" step="1" value="20" min="-1" max="20"></div>
-    <div class="row"><span class="label">آستانه</span>
-      <input type="number" id="setTh" value="-85"></div>
-    <div class="row"><span class="label">OOK</span>
-      <button class="btn btn-ook" id="setOok" onclick="toggleOOK()">OOK: روشن</button>
+      <input type="number" id="sdrFreqInput" step="0.01" value="433.92" min="240" max="930">
+      <button class="btn btn-green" style="flex:0 0 auto;padding:10px 14px"
+              onclick="setSdrFreq()">تنظیم</button></div>
+    <button class="btn btn-primary" id="sdrBtn" onclick="toggleSdr()" style="margin-top:8px">▶ پخش صدا</button>
+    <div class="hint" style="margin-top:8px">روی فرکانس مکالمه یا صدا تنظیم کن و پخش را بزن</div>
+  </div>
+
+  <div class="card">
+    <div class="row"><span class="label">اسکن صوتی</span></div>
+    <button class="btn btn-ook" style="width:100%;margin-top:6px"
+            onclick="send('SDR_SCAN')">🔍 پیدا کردن سیگنال صوتی</button>
+    <div class="hint">اتوماتیک فرکانس‌ها را چک می‌کند و روی قوی‌ترین توقف می‌کند</div>
+  </div>
+
+  <div class="card">
+    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📻 فرکانس‌های رایج صوتی</div>
+    <div class="presets">
+      <button class="btn-preset" onclick="quickSdr(144.00)">144.00</button>
+      <button class="btn-preset" onclick="quickSdr(145.00)">145.00</button>
+      <button class="btn-preset" onclick="quickSdr(433.50)">433.50</button>
+      <button class="btn-preset" onclick="quickSdr(446.00)">446.00</button>
+      <button class="btn-preset" onclick="quickSdr(868.10)">868.10</button>
+      <button class="btn-preset" onclick="quickSdr(915.00)">915.00</button>
     </div>
   </div>
-  <button class="btn btn-primary" onclick="saveSettings()">💾 ذخیره تنظیمات</button>
-  <button class="btn btn-stop" style="width:100%;margin-top:8px"
-          onclick="resetSettings()">↺ بازگشت به پیش‌فرض</button>
 </div>
 
+<!-- RECORD OVERLAY -->
 <div class="rec-overlay" id="recOverlay">
   <div class="rec-pulse"></div>
   <div class="rec-rssi" id="recLiveRssi">--- dBm</div>
@@ -298,8 +324,17 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
 </div>
 
 <script>
-let ws;
-let currentScreen='home';
+let ws, sdrWs, audioCtx=null, audioProcessor=null, sdrQueue=[], sdrPhase=0;
+let scanning=false, diagOn=false, sdrOn=false;
+const commonFreqs=[315.00,390.00,418.00,430.00,433.05,433.42,433.92,434.42,868.35,915.00];
+
+// Build preset buttons
+window.onload=()=>{
+  const pl=document.getElementById('presetList');
+  pl.innerHTML=commonFreqs.map(f=>
+    '<button class="btn-preset" onclick="pickPreset('+f+')">'+f.toFixed(2)+'</button>'
+  ).join('');
+};
 
 function connect(){
   ws=new WebSocket('ws://'+location.host+'/ws');
@@ -315,27 +350,19 @@ function connect(){
         document.getElementById('anRssi').textContent='RSSI: '+m.rssi+' dBm';
         setSbFreq(m.freq); setSbRssi(m.rssi);
       }
-      if(m.type==='DIAG'){
-        document.getElementById('anFreq').textContent=m.freq.toFixed(2);
-        document.getElementById('anRssi').textContent='RAW: '+m.raw+' | dBm: '+m.dbm;
-        setSbFreq(m.freq); setSbRssi(m.dbm);
-      }
       if(m.type==='SIGNALS') renderList(m.list);
       if(m.type==='STATUS') setSbState(m.msg);
       if(m.type==='SETTINGS') applySettings(m.data);
-      if(m.type==='OOK') setOokUI(m.on);
       if(m.type==='BITRATE') setBitrateUI(m.value);
       if(m.type==='LIVE'){
         document.getElementById('recLiveRssi').textContent=m.rssi+' dBm';
         document.getElementById('recStatus').textContent=m.state;
         setSbRssi(m.rssi);
-        if(m.state==='done'){
-          setTimeout(()=>{document.getElementById('recOverlay').classList.remove('active');},800);
-        }
-        if(m.state==='timeout'){
-          setTimeout(()=>{document.getElementById('recOverlay').classList.remove('active');},1500);
-        }
+        if(m.state==='done') setTimeout(()=>document.getElementById('recOverlay').classList.remove('active'),800);
+        if(m.state==='timeout') setTimeout(()=>document.getElementById('recOverlay').classList.remove('active'),1500);
       }
+      if(m.type==='SDR_FREQ'){document.getElementById('sdrFreq').textContent=m.freq.toFixed(2);}
+      if(m.type==='SDR_STATUS'){document.getElementById('sdrStatus').textContent=m.msg;}
     }catch(x){}
   };
 }
@@ -344,7 +371,6 @@ function send(c){if(ws&&ws.readyState===1)ws.send(c);}
 function go(screen){
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   document.getElementById('sc-'+screen).classList.add('active');
-  currentScreen=screen;
   if(screen==='saved') send('LIST');
   if(screen==='settings') send('GET_SETTINGS');
   if(screen!=='analyzer' && scanning){ scanning=false; send('STOP');
@@ -355,6 +381,14 @@ function setSbFreq(f){document.getElementById('sbFreq').textContent=(+f).toFixed
 function setSbRssi(r){document.getElementById('sbRssi').textContent=r+' dBm';}
 function setSbState(s){document.getElementById('sbState').textContent='● '+s;}
 
+// === Presets ===
+function pickPreset(f){
+  document.getElementById('anTarget').value=f.toFixed(2);
+  send('SET_FREQ:'+f);
+  setSbFreq(f);
+}
+
+// === Bitrate ===
 function setBitrate(br){ send('SET_BITRATE:'+br); }
 function setBitrateUI(br){
   ['rbr24','rbr48','rbr96'].forEach(id=>{
@@ -365,12 +399,7 @@ function setBitrateUI(br){
   else if(br==9.6){const e=document.getElementById('rbr96'); if(e)e.classList.add('active');}
 }
 
-function toggleOOK(){ send('TOGGLE_OOK'); }
-function setOokUI(on){
-  const b=document.getElementById('setOok');
-  if(b) b.textContent='OOK: '+(on?'روشن':'خاموش');
-}
-
+// === Recording ===
 function beginRecord(){
   const n=(document.getElementById('recName').value||'').trim()||('sig_'+Date.now());
   const f=parseFloat(document.getElementById('recFreq').value||'433.92');
@@ -387,62 +416,118 @@ function cancelRecord(){
   document.getElementById('recOverlay').classList.remove('active');
 }
 
-let scanning=false;
+// === Scan ===
 function toggleScan(){
   scanning=!scanning;
   const b=document.getElementById('anBtn');
-  if(scanning){ send('SCAN'); b.textContent='⏹ توقف'; }
-  else { send('STOP'); b.textContent='▶ شروع اسکن'; }
+  if(scanning){
+    const s=parseFloat(document.getElementById('anStart').value);
+    const e=parseFloat(document.getElementById('anEnd').value);
+    const st=parseFloat(document.getElementById('anStep').value);
+    send('SCAN_RANGE:'+s+':'+e+':'+st);
+    b.textContent='⏹ توقف';
+  } else { send('STOP'); b.textContent='▶ شروع اسکن'; }
 }
-let diagOn=false;
-function toggleDiag(){
-  diagOn=!diagOn;
-  send('DIAG_TOGGLE');
-  const b=document.getElementById('diagBtn');
-  b.textContent=diagOn?'🔬 خاموش کردن':'🔬 عیب‌یابی';
-}
-function setTargetFreq(){
+function lockFreq(){
   const f=parseFloat(document.getElementById('anTarget').value);
-  if(f>=240&&f<=930) send('SET_FREQ:'+f);
+  if(f<240||f>930){ alert('فرکانس نامعتبر'); return; }
+  send('SET_FREQ:'+f);
+  document.getElementById('recFreq').value=f.toFixed(2);
+  document.getElementById('sdrFreqInput').value=f.toFixed(2);
+  setTimeout(()=>{ go('read'); }, 300);
 }
 
+// === Saved list ===
 function renderList(list){
   const el=document.getElementById('savedList');
-  if(!list||!list.length){ el.innerHTML='<div class="empty">خالی — ابتدا از Read استفاده کن</div>'; return; }
+  if(!list||!list.length){ el.innerHTML='<div class="empty">خالی</div>'; return; }
   el.innerHTML=list.map(s=>
     '<div class="sig"><div class="sig-head"><div style="flex:1">'+
     '<div class="sig-name">'+s.name+'</div>'+
     '<div class="sig-meta">'+s.freq+' MHz • '+s.len+' bytes</div></div>'+
     '<div class="sig-actions">'+
-    '<button class="btn btn-green btn-sm" onclick="playSig('+s.id+')">📡</button>'+
-    '<button class="btn btn-stop btn-sm" onclick="delSig('+s.id+')">🗑</button>'+
+    '<button class="btn btn-green" style="padding:8px 12px" onclick="playSig('+s.id+')">📡</button>'+
+    '<button class="btn btn-stop" style="padding:8px 12px" onclick="delSig('+s.id+')">🗑</button>'+
     '</div></div></div>').join('');
 }
 function playSig(id){ send('PLAY:'+id); }
 function delSig(id){ if(confirm('حذف شود؟')) send('DEL:'+id); }
-function clearAll(){ if(confirm('همه سیگنال‌ها حذف شوند؟')) send('CLEAR_ALL'); }
+function clearAll(){ if(confirm('همه حذف شوند؟')) send('CLEAR_ALL'); }
 
+// === Settings ===
 function applySettings(d){
-  document.getElementById('setFreq').value=d.freq;
-  document.getElementById('setBitrate').value=d.bitrate;
-  document.getElementById('setPower').value=d.power;
-  document.getElementById('setTh').value=d.threshold;
   document.getElementById('recTh').value=d.threshold;
   document.getElementById('recThV').textContent=d.threshold;
   setBitrateUI(d.bitrate);
   setSbFreq(d.freq);
 }
-function saveSettings(){
-  const s={
-    freq:parseFloat(document.getElementById('setFreq').value),
-    bitrate:parseFloat(document.getElementById('setBitrate').value),
-    power:parseInt(document.getElementById('setPower').value),
-    threshold:parseInt(document.getElementById('setTh').value),
-    scanStart:430, scanEnd:440, scanStep:0.1
-  };
-  send('SAVE:'+JSON.stringify(s));
+
+// === SDR ===
+function toggleSdr(){
+  if(!sdrOn){
+    // Start
+    audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state==='suspended') audioCtx.resume();
+    sdrQueue=[];
+    sdrPhase=0;
+
+    const bufSize=1024;
+    audioProcessor=audioCtx.createScriptProcessor(bufSize,1,1);
+    const ratio=8000/audioCtx.sampleRate; // expected sample rate from ESP32
+
+    audioProcessor.onaudioprocess=(e)=>{
+      const out=e.outputBuffer.getChannelData(0);
+      for(let i=0;i<out.length;i++){
+        if(sdrQueue.length===0){ out[i]=0; continue; }
+        out[i]=sdrQueue[0];
+        sdrPhase+=ratio;
+        while(sdrPhase>=1 && sdrQueue.length>0){ sdrPhase-=1; sdrQueue.shift(); }
+      }
+    };
+    audioProcessor.connect(audioCtx.destination);
+
+    sdrWs=new WebSocket('ws://'+location.host+'/sdr');
+    sdrWs.binaryType='arraybuffer';
+    sdrWs.onopen=()=>{ send('SDR_START'); };
+    sdrWs.onmessage=(e)=>{
+      const arr=new Uint8Array(e.data);
+      for(let i=0;i<arr.length;i++){
+        // RSSI 0-255 → audio -1..1 (AC coupling)
+        const v=(arr[i]-128)/128;
+        sdrQueue.push(v);
+      }
+      // limit queue
+      while(sdrQueue.length>8192) sdrQueue.shift();
+    };
+    sdrWs.onclose=()=>{ if(sdrOn) setTimeout(()=>toggleSdr(),500); };
+
+    sdrOn=true;
+    document.getElementById('sdrBtn').textContent='⏹ توقف صدا';
+    document.getElementById('sdrBtn').className='btn btn-danger';
+    document.getElementById('sdrStatus').textContent='در حال پخش...';
+  } else {
+    // Stop
+    sdrOn=false;
+    send('SDR_STOP');
+    if(sdrWs){ try{sdrWs.close();}catch(x){} sdrWs=null; }
+    if(audioProcessor){ try{audioProcessor.disconnect();}catch(x){} audioProcessor=null; }
+    if(audioCtx){ try{audioCtx.close();}catch(x){} audioCtx=null; }
+    sdrQueue=[];
+    document.getElementById('sdrBtn').textContent='▶ پخش صدا';
+    document.getElementById('sdrBtn').className='btn btn-primary';
+    document.getElementById('sdrStatus').textContent='متوقف';
+  }
 }
-function resetSettings(){ if(confirm('بازگشت به پیش‌فرض؟')) send('RESET'); }
+function setSdrFreq(){
+  const f=parseFloat(document.getElementById('sdrFreqInput').value);
+  if(f<240||f>930){ alert('فرکانس نامعتبر'); return; }
+  send('SDR_FREQ:'+f);
+  document.getElementById('sdrFreq').textContent=f.toFixed(2);
+}
+function quickSdr(f){
+  document.getElementById('sdrFreqInput').value=f.toFixed(2);
+  setSdrFreq();
+}
 
 connect();
 </script></body></html>
@@ -476,7 +561,6 @@ void sendSettings(){
   String out="{\"type\":\"SETTINGS\",\"data\":{";
   out+="\"freq\":"+String(cfgFreq,2);
   out+=",\"bitrate\":"+String(cfgBitrate,2);
-  out+=",\"power\":"+String(cfgPower);
   out+=",\"threshold\":"+String(cfgThreshold);
   out+="}}"; ws.textAll(out);
 }
@@ -521,9 +605,6 @@ void loadPrefs(){
   cfgBitrate=prefs.getFloat("bitrate",4.8);
   cfgPower=prefs.getInt("power",20);
   cfgThreshold=prefs.getInt("th",-85);
-  scanStart=prefs.getFloat("ss",430.0);
-  scanEnd=prefs.getFloat("se",440.0);
-  scanStep=prefs.getFloat("st",0.1);
   cfgOOK=prefs.getBool("ook",true);
   prefs.end();
 }
@@ -533,9 +614,6 @@ void savePrefs(){
   prefs.putFloat("bitrate",cfgBitrate);
   prefs.putInt("power",cfgPower);
   prefs.putInt("th",cfgThreshold);
-  prefs.putFloat("ss",scanStart);
-  prefs.putFloat("se",scanEnd);
-  prefs.putFloat("st",scanStep);
   prefs.putBool("ook",cfgOOK);
   prefs.end();
 }
@@ -550,7 +628,7 @@ void reinitRadio(){
   radio.setTransmitPower((byte)map(cfgPower,-1,20,0,7));
   radio.setPacketHandling(false);
   radio.setManchesterEncoding(false);
-  radio.startListening();          // ← اصلاح: به حالت RX برو
+  radio.startListening();
   pinMode(PIN_CS,OUTPUT);
   digitalWrite(PIN_CS,HIGH);
   Serial.println("OK");
@@ -560,11 +638,11 @@ void reinitRadio(){
 byte readRssiReg(){
   SPI.beginTransaction(SPISettings(1000000,MSBFIRST,SPI_MODE0));
   digitalWrite(PIN_CS,LOW);
-  delayMicroseconds(5);
+  delayMicroseconds(3);
   SPI.transfer(0x26);
-  delayMicroseconds(5);
+  delayMicroseconds(3);
   byte r=SPI.transfer(0x00);
-  delayMicroseconds(5);
+  delayMicroseconds(3);
   digitalWrite(PIN_CS,HIGH);
   SPI.endTransaction();
   return r;
@@ -574,7 +652,7 @@ int readRssi(){
   for(int i=0;i<3;i++){
     byte r=readRssiReg();
     if(r>maxR) maxR=r;
-    delayMicroseconds(80);
+    delayMicroseconds(60);
   }
   return (int)(0.5f*maxR)-131;
 }
@@ -584,24 +662,28 @@ void doScan(){
   if(!scanning) return;
   if(currentFreq>scanEnd) currentFreq=scanStart;
   radio.setFrequency(currentFreq);
-  radio.startListening();          // ← اصلاح
-  delay(50);
+  radio.startListening();
+  delay(30);
   int rssi=readRssi();
   ws.textAll("{\"type\":\"SCAN\",\"freq\":"+String(currentFreq,2)+",\"rssi\":"+String(rssi)+"}");
   currentFreq+=scanStep;
 }
 
-// ==================== Diagnostic ====================
-void doDiagnostic(){
-  if(!diagnosticMode) return;
-  radio.setFrequency(currentFreq);
-  radio.startListening();          // ← اصلاح
-  delay(50);
+// ==================== SDR ====================
+void doSdr(){
+  if(!sdrActive) return;
+  unsigned long now=micros();
+  if(now-lastSdrSample<SDR_SAMPLE_INTERVAL_US) return;
+  lastSdrSample=now;
+
   byte raw=readRssiReg();
-  int rssi=(int)(0.5f*raw)-131;
-  ws.textAll("{\"type\":\"DIAG\",\"freq\":"+String(currentFreq,2)+",\"raw\":"+String(raw)+",\"dbm\":"+String(rssi)+"}");
-  currentFreq+=scanStep;
-  if(currentFreq>scanEnd) currentFreq=scanStart;
+  sdrBuffer[sdrBufIdx++]=raw;
+
+  if(sdrBufIdx>=SDR_BUF_SIZE){
+    // send binary buffer to SDR socket
+    sdrSocket.binaryAll(sdrBuffer, SDR_BUF_SIZE);
+    sdrBufIdx=0;
+  }
 }
 
 // ==================== Recording ====================
@@ -612,7 +694,7 @@ void startRecording(float freq,const char* name){
   strncpy(recName,name,NAME_LEN-1); recName[NAME_LEN-1]=0;
   recFreq=freq;
   radio.setFrequency(recFreq);
-  radio.startListening();          // ← اصلاح
+  radio.startListening();
   delay(30);
   sendStatus("🎙 آماده ضبط");
 }
@@ -680,7 +762,7 @@ void replaySignal(int id){
       delay(20);
       radio.sendPacket((uint8_t)len,buf);
       delay(60);
-      radio.startListening();      // ← اصلاح
+      radio.startListening();
       sendStatus("📡 ارسال شد: "+String(signals[i].name));
       return;
     }
@@ -709,27 +791,36 @@ void clearAllSignals(){
   sendStatus("🗑 همه حذف شدند");
 }
 
-// ==================== WebSocket ====================
+// ==================== WebSocket Control ====================
 void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,uint8_t* d,size_t l){
   if(t!=WS_EVT_DATA)return;
   String cmd; cmd.reserve(l+1);
   for(size_t i=0;i<l;i++) cmd+=(char)d[i];
   cmd.trim();
 
-  if(cmd=="SCAN"){ scanning=true; diagnosticMode=false; recState=0; currentFreq=scanStart; sendStatus("در حال اسکن..."); }
+  if(cmd=="SCAN"){ scanning=true; diagnosticMode=false; sdrActive=false; recState=0;
+    scanStart=300; scanEnd=928; scanStep=0.5; currentFreq=scanStart;
+    sendStatus("در حال اسکن..."); }
+  else if(cmd.startsWith("SCAN_RANGE:")){
+    int p1=cmd.indexOf(':',11);
+    int p2=cmd.indexOf(':',p1+1);
+    if(p1>0 && p2>0){
+      scanStart=cmd.substring(11,p1).toFloat();
+      scanEnd=cmd.substring(p1+1,p2).toFloat();
+      scanStep=cmd.substring(p2+1).toFloat();
+      if(scanStep<0.05) scanStep=0.05;
+      currentFreq=scanStart;
+      scanning=true; diagnosticMode=false; sdrActive=false; recState=0;
+      sendStatus("اسکن از "+String(scanStart)+" تا "+String(scanEnd));
+    }
+  }
   else if(cmd=="STOP"){ scanning=false; diagnosticMode=false; if(recState)finishRecording(); sendStatus("متوقف"); }
   else if(cmd=="LIST"){ sendList(); }
   else if(cmd=="GET_SETTINGS"){ sendSettings(); }
   else if(cmd=="CLEAR_ALL"){ clearAllSignals(); }
-  else if(cmd=="DIAG_TOGGLE"){
-    diagnosticMode=!diagnosticMode; scanning=false; recState=0;
-    if(diagnosticMode){ currentFreq=scanStart; sendStatus("عیب‌یابی فعال"); }
-    else sendStatus("عیب‌یابی غیرفعال");
-  }
   else if(cmd=="TOGGLE_OOK"){
     cfgOOK=!cfgOOK; savePrefs(); reinitRadio();
     ws.textAll("{\"type\":\"OOK\",\"on\":"+String(cfgOOK?"true":"false")+"}");
-    sendStatus(cfgOOK?"OOK روشن":"GFSK روشن");
   }
   else if(cmd.startsWith("REC:")){
     int c1=cmd.indexOf(':',4);
@@ -737,6 +828,7 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
       float f=cmd.substring(4,c1).toFloat();
       String n=cmd.substring(c1+1);
       if(f<240||f>930){ sendStatus("❌ فرکانس نامعتبر"); return; }
+      scanning=false; diagnosticMode=false; sdrActive=false;
       startRecording(f,n.c_str());
     }
   }
@@ -747,7 +839,6 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
     if(br>=0.5&&br<=128){
       cfgBitrate=br; radio.setBaudRate(br); savePrefs();
       ws.textAll("{\"type\":\"BITRATE\",\"value\":"+String(br,1)+"}");
-      sendStatus("بیت‌ریت: "+String(br,1)+" kbps");
     }
   }
   else if(cmd.startsWith("THRESH:")){
@@ -755,29 +846,56 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
   }
   else if(cmd.startsWith("SET_FREQ:")){
     float f=cmd.substring(9).toFloat();
-    if(f>=240&&f<=930){ cfgFreq=f; radio.setFrequency(f); savePrefs(); sendStatus("فرکانس: "+String(f,2)); }
+    if(f>=240&&f<=930){ cfgFreq=f; radio.setFrequency(f); savePrefs(); }
   }
-  else if(cmd.startsWith("SAVE:")){
-    String j=cmd.substring(5);
-    int p;
-    p=j.indexOf("\"freq\":"); if(p>0) cfgFreq=j.substring(p+7).toFloat();
-    p=j.indexOf("\"bitrate\":"); if(p>0) cfgBitrate=j.substring(p+10).toFloat();
-    p=j.indexOf("\"power\":"); if(p>0) cfgPower=j.substring(p+8).toInt();
-    p=j.indexOf("\"threshold\":"); if(p>0) cfgThreshold=j.substring(p+12).toInt();
-    savePrefs(); reinitRadio(); sendSettings();
-    sendStatus("✅ تنظیمات ذخیره شد");
+  // === SDR commands ===
+  else if(cmd=="SDR_START"){
+    scanning=false; diagnosticMode=false; recState=0;
+    sdrActive=true; sdrBufIdx=0; lastSdrSample=micros();
+    radio.setFrequency(cfgFreq);
+    radio.startListening();
+    delay(30);
+    ws.textAll("{\"type\":\"SDR_STATUS\",\"msg\":\"در حال پخش صدا\"}");
+    ws.textAll("{\"type\":\"SDR_FREQ\",\"freq\":"+String(cfgFreq,2)+"}");
   }
-  else if(cmd=="RESET"){
-    prefs.begin("rfcfg",false); prefs.clear(); prefs.end();
-    loadPrefs(); reinitRadio(); sendSettings();
-    sendStatus("تنظیمات بازنشانی شد");
+  else if(cmd=="SDR_STOP"){
+    sdrActive=false;
+    ws.textAll("{\"type\":\"SDR_STATUS\",\"msg\":\"متوقف\"}");
   }
+  else if(cmd.startsWith("SDR_FREQ:")){
+    float f=cmd.substring(9).toFloat();
+    if(f>=240&&f<=930){
+      cfgFreq=f; radio.setFrequency(f); savePrefs();
+      ws.textAll("{\"type\":\"SDR_FREQ\",\"freq\":"+String(f,2)+"}");
+    }
+  }
+  else if(cmd=="SDR_SCAN"){
+    // simple audio-freq search: sample each preset, find strongest
+    sdrActive=false;
+    float bestF=433.92; int bestR=-200;
+    float testF[]={144.00,145.00,433.05,433.42,433.92,434.42,446.00,868.10,868.35,915.00};
+    for(int i=0;i<10;i++){
+      radio.setFrequency(testF[i]); radio.startListening(); delay(40);
+      int r=readRssi();
+      if(r>bestR){ bestR=r; bestF=testF[i]; }
+    }
+    cfgFreq=bestF; radio.setFrequency(bestF); savePrefs();
+    ws.textAll("{\"type\":\"SDR_FREQ\",\"freq\":"+String(bestF,2)+"}");
+    ws.textAll("{\"type\":\"SDR_STATUS\",\"msg\":\"بهترین فرکانس: \"+String(bestF,2)+\" MHz\"}");
+    char buf[64]; snprintf(buf,sizeof(buf),"{\"type\":\"SDR_STATUS\",\"msg\":\"بهترین: %.2f MHz (%d dBm)\"}",bestF,bestR);
+    ws.textAll(buf);
+  }
+}
+
+// ==================== SDR WebSocket (binary) ====================
+void onSdrWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,uint8_t* d,size_t l){
+  // no-op; only send side
 }
 
 // ==================== Setup / Loop ====================
 void setup(){
   Serial.begin(115200); delay(500);
-  Serial.println("\n=== Si4432 Pro (Flipper UI) ===");
+  Serial.println("\n=== Si4432 Pro (Analyzer + SDR) ===");
 
   if(!LittleFS.begin(true)) Serial.println("FS failed");
   loadIndex();
@@ -790,6 +908,10 @@ void setup(){
 
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
+
+  sdrSocket.onEvent(onSdrWsEvent);
+  server.addHandler(&sdrSocket);
+
   server.on("/",HTTP_GET,[](AsyncWebServerRequest* r){
     r->send_P(200,"text/html; charset=utf-8",HTML);
   });
@@ -801,8 +923,14 @@ void setup(){
 void loop(){
   ElegantOTA.loop();
   ws.cleanupClients();
-  if(diagnosticMode) doDiagnostic();
-  else if(scanning) doScan();
-  if(recState) doRecord();
-  delay(1);
+  sdrSocket.cleanupClients();
+
+  if(sdrActive){
+    doSdr();
+  } else {
+    if(diagnosticMode) doDiagnostic();
+    else if(scanning) doScan();
+    if(recState) doRecord();
+    delay(1);
+  }
 }
