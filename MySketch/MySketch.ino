@@ -34,7 +34,6 @@ bool  cfgOOK = true;
 
 // ==================== State ====================
 bool scanning = false;
-bool diagnosticMode = false;
 bool sdrActive = false;
 int  recState = 0;
 float currentFreq = 433.92;
@@ -54,19 +53,12 @@ char     recName[32] = "";
 #define REC_TIMEOUT_MS 300
 #define REC_START_TIMEOUT_MS 5000
 
-// ==================== Common RF Remote Frequencies ====================
-const float commonFreqs[] = {
-  315.00, 390.00, 418.00, 430.00, 433.05,
-  433.42, 433.92, 434.42, 868.35, 915.00
-};
-const int commonFreqsCount = 10;
-
 // ==================== SDR ====================
 #define SDR_BUF_SIZE 128
 uint8_t sdrBuffer[SDR_BUF_SIZE];
 int sdrBufIdx = 0;
 unsigned long lastSdrSample = 0;
-#define SDR_SAMPLE_INTERVAL_US 125  // ~8 kHz
+#define SDR_SAMPLE_INTERVAL_US 125
 
 // ==================== Signals ====================
 #define MAX_SIGNALS 32
@@ -125,7 +117,6 @@ input:focus{outline:none;border-color:#00e5ff}
 .btn-stop{background:#2d3a54;color:#e0e6ed;flex:1}
 .btn-green{background:#00b894;color:#fff}
 .btn-ook{background:#f9a825;color:#000;flex:1}
-.btn-diag{background:#6c5ce7;color:#fff;flex:1}
 .btn-preset{background:#34495e;color:#fff;padding:8px 4px;font-size:.7em;flex:1;min-width:60px;margin:2px}
 .btn-preset.active{background:#00e5ff;color:#0a0e17}
 .btn-row{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
@@ -168,7 +159,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   <span id="sbState">● idle</span>
 </div>
 
-<!-- HOME -->
 <div id="sc-home" class="screen active">
   <div class="header"><div class="title">📡 Si4432 Pro</div></div>
   <div class="menu">
@@ -195,7 +185,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- READ -->
 <div id="sc-read" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
@@ -221,7 +210,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- SAVED -->
 <div id="sc-saved" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
@@ -232,7 +220,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   <div id="savedList"><div class="empty">خالی</div></div>
 </div>
 
-<!-- ANALYZER -->
 <div id="sc-analyzer" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
@@ -273,7 +260,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- SDR -->
 <div id="sc-sdr" class="screen">
   <div class="header">
     <button class="back" onclick="go('home')">←</button>
@@ -315,7 +301,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- RECORD OVERLAY -->
 <div class="rec-overlay" id="recOverlay">
   <div class="rec-pulse"></div>
   <div class="rec-rssi" id="recLiveRssi">--- dBm</div>
@@ -325,10 +310,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
 
 <script>
 let ws, sdrWs, audioCtx=null, audioProcessor=null, sdrQueue=[], sdrPhase=0;
-let scanning=false, diagOn=false, sdrOn=false;
+let scanning=false, sdrOn=false;
 const commonFreqs=[315.00,390.00,418.00,430.00,433.05,433.42,433.92,434.42,868.35,915.00];
 
-// Build preset buttons
 window.onload=()=>{
   const pl=document.getElementById('presetList');
   pl.innerHTML=commonFreqs.map(f=>
@@ -372,7 +356,6 @@ function go(screen){
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   document.getElementById('sc-'+screen).classList.add('active');
   if(screen==='saved') send('LIST');
-  if(screen==='settings') send('GET_SETTINGS');
   if(screen!=='analyzer' && scanning){ scanning=false; send('STOP');
     const b=document.getElementById('anBtn'); if(b)b.textContent='▶ شروع اسکن'; }
 }
@@ -381,14 +364,12 @@ function setSbFreq(f){document.getElementById('sbFreq').textContent=(+f).toFixed
 function setSbRssi(r){document.getElementById('sbRssi').textContent=r+' dBm';}
 function setSbState(s){document.getElementById('sbState').textContent='● '+s;}
 
-// === Presets ===
 function pickPreset(f){
   document.getElementById('anTarget').value=f.toFixed(2);
   send('SET_FREQ:'+f);
   setSbFreq(f);
 }
 
-// === Bitrate ===
 function setBitrate(br){ send('SET_BITRATE:'+br); }
 function setBitrateUI(br){
   ['rbr24','rbr48','rbr96'].forEach(id=>{
@@ -399,7 +380,6 @@ function setBitrateUI(br){
   else if(br==9.6){const e=document.getElementById('rbr96'); if(e)e.classList.add('active');}
 }
 
-// === Recording ===
 function beginRecord(){
   const n=(document.getElementById('recName').value||'').trim()||('sig_'+Date.now());
   const f=parseFloat(document.getElementById('recFreq').value||'433.92');
@@ -416,7 +396,6 @@ function cancelRecord(){
   document.getElementById('recOverlay').classList.remove('active');
 }
 
-// === Scan ===
 function toggleScan(){
   scanning=!scanning;
   const b=document.getElementById('anBtn');
@@ -437,7 +416,6 @@ function lockFreq(){
   setTimeout(()=>{ go('read'); }, 300);
 }
 
-// === Saved list ===
 function renderList(list){
   const el=document.getElementById('savedList');
   if(!list||!list.length){ el.innerHTML='<div class="empty">خالی</div>'; return; }
@@ -454,7 +432,6 @@ function playSig(id){ send('PLAY:'+id); }
 function delSig(id){ if(confirm('حذف شود؟')) send('DEL:'+id); }
 function clearAll(){ if(confirm('همه حذف شوند؟')) send('CLEAR_ALL'); }
 
-// === Settings ===
 function applySettings(d){
   document.getElementById('recTh').value=d.threshold;
   document.getElementById('recThV').textContent=d.threshold;
@@ -462,10 +439,8 @@ function applySettings(d){
   setSbFreq(d.freq);
 }
 
-// === SDR ===
 function toggleSdr(){
   if(!sdrOn){
-    // Start
     audioCtx=new (window.AudioContext||window.webkitAudioContext)();
     if(audioCtx.state==='suspended') audioCtx.resume();
     sdrQueue=[];
@@ -473,7 +448,7 @@ function toggleSdr(){
 
     const bufSize=1024;
     audioProcessor=audioCtx.createScriptProcessor(bufSize,1,1);
-    const ratio=8000/audioCtx.sampleRate; // expected sample rate from ESP32
+    const ratio=8000/audioCtx.sampleRate;
 
     audioProcessor.onaudioprocess=(e)=>{
       const out=e.outputBuffer.getChannelData(0);
@@ -492,11 +467,9 @@ function toggleSdr(){
     sdrWs.onmessage=(e)=>{
       const arr=new Uint8Array(e.data);
       for(let i=0;i<arr.length;i++){
-        // RSSI 0-255 → audio -1..1 (AC coupling)
         const v=(arr[i]-128)/128;
         sdrQueue.push(v);
       }
-      // limit queue
       while(sdrQueue.length>8192) sdrQueue.shift();
     };
     sdrWs.onclose=()=>{ if(sdrOn) setTimeout(()=>toggleSdr(),500); };
@@ -506,7 +479,6 @@ function toggleSdr(){
     document.getElementById('sdrBtn').className='btn btn-danger';
     document.getElementById('sdrStatus').textContent='در حال پخش...';
   } else {
-    // Stop
     sdrOn=false;
     send('SDR_STOP');
     if(sdrWs){ try{sdrWs.close();}catch(x){} sdrWs=null; }
@@ -680,7 +652,6 @@ void doSdr(){
   sdrBuffer[sdrBufIdx++]=raw;
 
   if(sdrBufIdx>=SDR_BUF_SIZE){
-    // send binary buffer to SDR socket
     sdrSocket.binaryAll(sdrBuffer, SDR_BUF_SIZE);
     sdrBufIdx=0;
   }
@@ -798,7 +769,7 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
   for(size_t i=0;i<l;i++) cmd+=(char)d[i];
   cmd.trim();
 
-  if(cmd=="SCAN"){ scanning=true; diagnosticMode=false; sdrActive=false; recState=0;
+  if(cmd=="SCAN"){ scanning=true; sdrActive=false; recState=0;
     scanStart=300; scanEnd=928; scanStep=0.5; currentFreq=scanStart;
     sendStatus("در حال اسکن..."); }
   else if(cmd.startsWith("SCAN_RANGE:")){
@@ -810,11 +781,11 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
       scanStep=cmd.substring(p2+1).toFloat();
       if(scanStep<0.05) scanStep=0.05;
       currentFreq=scanStart;
-      scanning=true; diagnosticMode=false; sdrActive=false; recState=0;
+      scanning=true; sdrActive=false; recState=0;
       sendStatus("اسکن از "+String(scanStart)+" تا "+String(scanEnd));
     }
   }
-  else if(cmd=="STOP"){ scanning=false; diagnosticMode=false; if(recState)finishRecording(); sendStatus("متوقف"); }
+  else if(cmd=="STOP"){ scanning=false; if(recState)finishRecording(); sendStatus("متوقف"); }
   else if(cmd=="LIST"){ sendList(); }
   else if(cmd=="GET_SETTINGS"){ sendSettings(); }
   else if(cmd=="CLEAR_ALL"){ clearAllSignals(); }
@@ -828,7 +799,7 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
       float f=cmd.substring(4,c1).toFloat();
       String n=cmd.substring(c1+1);
       if(f<240||f>930){ sendStatus("❌ فرکانس نامعتبر"); return; }
-      scanning=false; diagnosticMode=false; sdrActive=false;
+      scanning=false; sdrActive=false;
       startRecording(f,n.c_str());
     }
   }
@@ -848,9 +819,8 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
     float f=cmd.substring(9).toFloat();
     if(f>=240&&f<=930){ cfgFreq=f; radio.setFrequency(f); savePrefs(); }
   }
-  // === SDR commands ===
   else if(cmd=="SDR_START"){
-    scanning=false; diagnosticMode=false; recState=0;
+    scanning=false; recState=0;
     sdrActive=true; sdrBufIdx=0; lastSdrSample=micros();
     radio.setFrequency(cfgFreq);
     radio.startListening();
@@ -870,7 +840,6 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
     }
   }
   else if(cmd=="SDR_SCAN"){
-    // simple audio-freq search: sample each preset, find strongest
     sdrActive=false;
     float bestF=433.92; int bestR=-200;
     float testF[]={144.00,145.00,433.05,433.42,433.92,434.42,446.00,868.10,868.35,915.00};
@@ -881,15 +850,15 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
     }
     cfgFreq=bestF; radio.setFrequency(bestF); savePrefs();
     ws.textAll("{\"type\":\"SDR_FREQ\",\"freq\":"+String(bestF,2)+"}");
-    ws.textAll("{\"type\":\"SDR_STATUS\",\"msg\":\"بهترین فرکانس: \"+String(bestF,2)+\" MHz\"}");
-    char buf[64]; snprintf(buf,sizeof(buf),"{\"type\":\"SDR_STATUS\",\"msg\":\"بهترین: %.2f MHz (%d dBm)\"}",bestF,bestR);
+    char buf[80];
+    snprintf(buf,sizeof(buf),"{\"type\":\"SDR_STATUS\",\"msg\":\"بهترین: %.2f MHz (%d dBm)\"}",bestF,bestR);
     ws.textAll(buf);
   }
 }
 
-// ==================== SDR WebSocket (binary) ====================
+// ==================== SDR WebSocket ====================
 void onSdrWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,uint8_t* d,size_t l){
-  // no-op; only send side
+  // send only
 }
 
 // ==================== Setup / Loop ====================
@@ -928,8 +897,7 @@ void loop(){
   if(sdrActive){
     doSdr();
   } else {
-    if(diagnosticMode) doDiagnostic();
-    else if(scanning) doScan();
+    if(scanning) doScan();
     if(recState) doRecord();
     delay(1);
   }
