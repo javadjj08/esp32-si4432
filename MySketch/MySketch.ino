@@ -15,17 +15,14 @@
 #include <ESPAsyncWebServer.h>
 #include <ElegantOTA.h>
 
-// ==================== Si4432 Pins (VSPI - پیش‌فرض) ====================
+// ==================== Si4432 Pins (VSPI) ====================
 #define PIN_CS   5
 #define PIN_SDN  15
 #define PIN_IRQ  16
 
-// ==================== nRF24 Pins (HSPI - باس دوم) ====================
+// ==================== nRF24 Pins (share VSPI bus, separate CS) ====================
 #define NRF_CE   26
 #define NRF_CSN  27
-#define HSPI_SCK  14
-#define HSPI_MISO 12
-#define HSPI_MOSI 13
 
 // ==================== WiFi ====================
 const char* AP_SSID = "RF-Recorder";
@@ -35,9 +32,8 @@ const char* AP_PASS = "12345678";
 Si4432 radio(PIN_CS, PIN_SDN, PIN_IRQ);
 Preferences prefs;
 
-// ==================== nRF24 (روی HSPI) ====================
-SPIClass hspi = SPIClass(HSPI);
-RF24 nrf(NRF_CE, NRF_CSN, 4000000, &hspi);
+// ==================== nRF24 (shared VSPI with Si4432) ====================
+RF24 nrf(NRF_CE, NRF_CSN);
 
 // ==================== Si4432 Config ====================
 float cfgFreq = 433.92;
@@ -49,10 +45,10 @@ bool  cfgManchester = false;
 
 // ==================== nRF24 Config ====================
 int    nrfChannel = 76;
-int    nrfDataRate = 1;          // 0=250k, 1=1M, 2=2M
-int    nrfPowerLevel = 3;        // 0=min, 1=low, 2=high, 3=max
+int    nrfDataRate = 1;
+int    nrfPowerLevel = 3;
 bool   nrfAutoAck = false;
-int    nrfCrcLength = 0;         // 0=off, 1=1byte, 2=2byte
+int    nrfCrcLength = 0;
 uint8_t nrfAddress[5] = {0xE7, 0xE7, 0xE7, 0xE7, 0xE7};
 uint8_t nrfPayloadSize = 32;
 
@@ -82,6 +78,7 @@ bool adaptiveScanEnabled = true;
 int   noiseFloor = -100;
 int   noiseSamples = 0;
 long  noiseSum = 0;
+int   adaptiveThreshold = -85;
 
 bool trackerEnabled = false;
 float trackerFreq = 0;
@@ -224,7 +221,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   <span id="sbState">● idle</span>
 </div>
 
-<!-- HOME -->
 <div id="sc-home" class="screen active">
   <div class="header"><div class="title">📡 RF Ultimate</div></div>
   <div class="menu">
@@ -240,7 +236,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- READ -->
 <div id="sc-read" class="screen">
   <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">📻 Read Signal</div></div>
   <div class="card">
@@ -265,7 +260,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- SAVED -->
 <div id="sc-saved" class="screen">
   <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">📼 Saved Signals</div>
     <button class="btn btn-stop" style="flex:0 0 auto;padding:6px 10px;font-size:.8em" onclick="clearAll()">🗑 همه</button></div>
@@ -273,7 +267,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   <div id="savedList"><div class="empty">خالی</div></div>
 </div>
 
-<!-- ANALYZER -->
 <div id="sc-analyzer" class="screen">
   <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">🔍 Analyzer</div></div>
   <div class="display">
@@ -302,7 +295,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- SDR -->
 <div id="sc-sdr" class="screen">
   <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">🔊 SDR</div></div>
   <div class="display"><span class="value" id="sdrFreq">---.--</span><div class="unit">MHz</div>
@@ -316,7 +308,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   <div class="card"><button class="btn btn-ook" style="width:100%" onclick="send('SDR_SCAN')">🔍 پیدا کردن سیگنال صوتی</button></div>
 </div>
 
-<!-- SENSORS -->
 <div id="sc-sensors" class="screen">
   <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">🌡️ Sensors</div></div>
   <div class="card" style="text-align:center"><div style="font-size:3em;color:#00e5ff;font-family:monospace" id="tempDisplay">--</div>
@@ -326,7 +317,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   <button class="btn btn-primary" onclick="readSensors()">🔄 به‌روزرسانی</button>
 </div>
 
-<!-- HOPPING -->
 <div id="sc-hopping" class="screen">
   <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">📡 Frequency Hopping</div></div>
   <div class="card">
@@ -335,7 +325,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- nRF24 Suite -->
 <div id="sc-nrf24" class="screen">
   <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">📶 nRF24 Suite</div></div>
 
@@ -353,17 +342,17 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
     </div>
     <div class="row"><span class="label">نرخ داده</span>
       <select id="nrfDataRate">
-        <option value="0">250 kbps (برد بیشتر)</option>
-        <option value="1" selected>1 Mbps (استاندارد)</option>
-        <option value="2">2 Mbps (سریع‌تر)</option>
+        <option value="0">250 kbps</option>
+        <option value="1" selected>1 Mbps</option>
+        <option value="2">2 Mbps</option>
       </select>
     </div>
-    <div class="row"><span class="label">توان ارسال</span>
+    <div class="row"><span class="label">توان</span>
       <select id="nrfPower">
-        <option value="0">-18 dBm (کمترین)</option>
+        <option value="0">-18 dBm</option>
         <option value="1">-12 dBm</option>
         <option value="2">-6 dBm</option>
-        <option value="3" selected>0 dBm (حداکثر)</option>
+        <option value="3" selected>0 dBm</option>
       </select>
     </div>
     <div class="row"><span class="label">Auto ACK</span>
@@ -371,29 +360,28 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
     </div>
     <div class="row"><span class="label">CRC</span>
       <select id="nrfCrc">
-        <option value="0" selected>خاموش (Sniffer)</option>
+        <option value="0" selected>خاموش</option>
         <option value="1">1 بایت</option>
         <option value="2">2 بایت</option>
       </select>
     </div>
-    <div class="row"><span class="label">آدرس (Hex)</span>
-      <input type="text" id="nrfAddress" value="E7E7E7E7E7" maxlength="10" placeholder="5 بایت hex">
+    <div class="row"><span class="label">آدرس Hex</span>
+      <input type="text" id="nrfAddress" value="E7E7E7E7E7" maxlength="10">
     </div>
-    <div class="row"><span class="label">طول Payload</span>
+    <div class="row"><span class="label">Payload</span>
       <input type="number" id="nrfPayload" value="32" min="1" max="32">
     </div>
-    <button class="btn btn-primary" style="margin-top:8px" onclick="applyNrfConfig()">💾 اعمال تنظیمات</button>
+    <button class="btn btn-primary" style="margin-top:8px" onclick="applyNrfConfig()">💾 اعمال</button>
   </div>
 
   <div class="card">
-    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">🔍 اسکنر کانال (WiFi Analyzer Style)</div>
+    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">🔍 اسکنر کانال</div>
     <canvas id="nrfGraph"></canvas>
-    <div class="hint">۱۲۶ کانال — ارتفاع = ترافیک دریافتی</div>
-    <button class="btn btn-ook" style="width:100%;margin-top:8px" id="nrfScanBtn" onclick="toggleNrfScan()">📊 شروع اسکن همه کانال‌ها</button>
+    <button class="btn btn-ook" style="width:100%;margin-top:8px" id="nrfScanBtn" onclick="toggleNrfScan()">📊 شروع اسکن</button>
   </div>
 
   <div class="card">
-    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📡 Sniffer (شنود بسته‌ها)</div>
+    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📡 Sniffer</div>
     <div class="row"><span class="label">Pipe</span>
       <select id="nrfPipe">
         <option value="0" selected>Pipe 0</option>
@@ -405,12 +393,11 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
       </select>
     </div>
     <button class="btn btn-green" style="width:100%" id="nrfSniffBtn" onclick="toggleNrfSniff()">📡 شروع Sniffer</button>
-    <div class="hint">آدرس‌های پیش‌فرض: E7E7E7E7E7 / C2C2C2C2C2 / 0x55, 0xAA</div>
   </div>
 
   <div class="card">
     <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📤 فرستنده</div>
-    <div class="row"><span class="label">متن/Hex</span>
+    <div class="row"><span class="label">متن</span>
       <input type="text" id="nrfTxData" value="HELLO" maxlength="32">
     </div>
     <div class="row">
@@ -418,15 +405,14 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
       <button class="btn btn-ook" style="flex:1" onclick="nrfSendHex()">📤 ارسال Hex</button>
     </div>
     <div class="row">
-      <button class="btn btn-green" style="flex:1" onclick="nrfSendTest()">🔁 ارسال تست</button>
+      <button class="btn btn-green" style="flex:1" onclick="nrfSendTest()">🔁 تست</button>
       <button class="btn btn-stop" style="flex:1" onclick="nrfStop()">⏹ توقف</button>
     </div>
   </div>
 
   <div class="card">
-    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">💥 Jammer (فقط تست)</div>
+    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">💥 Jammer</div>
     <button class="btn btn-danger" style="width:100%" id="nrfJamBtn" onclick="toggleNrfJam()">💥 شروع Jammer</button>
-    <div class="hint">کانال‌ها را سریع تغییر می‌دهد و نویز ارسال می‌کند</div>
   </div>
 
   <div class="card">
@@ -436,7 +422,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- DIAGNOSTIC -->
 <div id="sc-diagnostic" class="screen">
   <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">🧪 Diagnostic</div></div>
   <div class="card"><button class="btn btn-primary" onclick="startDiagnostic()">▶ تست جامع</button>
@@ -447,7 +432,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
     <div class="diag-box" id="nrfTestOutput"><div>در انتظار...</div></div></div>
 </div>
 
-<!-- SETTINGS -->
 <div id="sc-settings" class="screen">
   <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">⚙️ Settings</div></div>
   <div class="card">
@@ -457,7 +441,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
-<!-- RECORD OVERLAY -->
 <div class="rec-overlay" id="recOverlay">
   <div class="rec-pulse"></div>
   <div class="rec-rssi" id="recLiveRssi">--- dBm</div>
@@ -465,7 +448,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   <button class="rec-cancel" onclick="cancelRecord()">لغو</button>
 </div>
 
-<!-- HEX MODAL -->
 <div class="modal" id="hexModal">
   <div class="modal-content">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
@@ -484,7 +466,6 @@ const commonFreqs=[315.00,390.00,418.00,430.00,433.05,433.42,433.92,434.42,868.3
 let rssiHistory=[];
 let allSignals=[];
 let nrfChanData=new Array(126).fill(0);
-let nrfScanTimer=null;
 
 window.onload=()=>{
   const pl=document.getElementById('presetList');
@@ -531,7 +512,6 @@ function drawNrfGraph(){
     ctx.fillStyle = 'hsl('+hue+',100%,50%)';
     ctx.fillRect(x+1, y, bw-1, bh);
   }
-  // Mark channel boundaries
   ctx.strokeStyle='#00e5ff'; ctx.lineWidth=2;
   const xC=(parseInt(document.getElementById('nrfChanSlider').value))*bw;
   ctx.beginPath(); ctx.moveTo(xC+bw/2,0); ctx.lineTo(xC+bw/2,h); ctx.stroke();
@@ -711,7 +691,6 @@ function toggleSdr(){
   }
 }
 
-// nRF24 UI functions
 function onNrfChanSlide(val){
   document.getElementById('nrfChanVal').textContent=val;
   document.getElementById('nrfFreqCalc').textContent=2400+parseInt(val);
@@ -731,7 +710,7 @@ function toggleNrfScan(){
   if(nrfScanning){ nrfChanData=new Array(126).fill(0); drawNrfGraph(); send('NRF_SCAN_START'); }
   else send('NRF_SCAN_STOP');
   const b=document.getElementById('nrfScanBtn');
-  b.textContent=nrfScanning?'⏹ توقف اسکن':'📊 شروع اسکن همه کانال‌ها';
+  b.textContent=nrfScanning?'⏹ توقف اسکن':'📊 شروع اسکن';
 }
 function toggleNrfSniff(){
   nrfSniffing=!nrfSniffing;
@@ -748,14 +727,8 @@ function toggleNrfJam(){
   b.textContent=nrfJamming?'⏹ توقف Jammer':'💥 شروع Jammer';
   b.className=nrfJamming?'btn btn-stop':'btn btn-danger';
 }
-function nrfSendText(){
-  const t=document.getElementById('nrfTxData').value;
-  send('NRF_TX_TEXT:'+t);
-}
-function nrfSendHex(){
-  const t=document.getElementById('nrfTxData').value;
-  send('NRF_TX_HEX:'+t);
-}
+function nrfSendText(){ const t=document.getElementById('nrfTxData').value; send('NRF_TX_TEXT:'+t); }
+function nrfSendHex(){ const t=document.getElementById('nrfTxData').value; send('NRF_TX_HEX:'+t); }
 function nrfSendTest(){ send('NRF_TX_TEST'); }
 function nrfStop(){ send('NRF_TX_STOP'); }
 function clearNrfOutput(){ document.getElementById('nrfOutput').innerHTML='آماده...'; }
@@ -810,7 +783,27 @@ void writeRegister(byte reg, byte val) { SPI.beginTransaction(SPISettings(100000
 void readSensors() { writeRegister(0x0F, 0x00); writeRegister(0x12, 0x80); byte reg0F = readRegister(0x0F); writeRegister(0x0F, reg0F | 0x80); delay(5); byte adcValue = readRegister(0x11); chipTemp = ((float)adcValue) * 0.5f; writeRegister(0x0F, 0x08); delay(5); byte vddValue = readRegister(0x11); supplyVoltage = ((float)vddValue) * 0.02f; char buf[80]; snprintf(buf,sizeof(buf),"{\"type\":\"SENSORS\",\"temp\":%.1f,\"volt\":%.2f}", chipTemp, supplyVoltage); ws.textAll(buf); }
 
 // ==================== Adaptive Scan ====================
-void performAdaptiveScan() { if(noiseSamples < 20) { byte raw = readRssiReg(); int dbm = (int)(0.5f*raw)-131; noiseSum += dbm; noiseSamples++; if(noiseSamples == 20) { noiseFloor = noiseSum / 20; adaptiveThreshold = noiseFloor + 10; if(adaptiveThreshold > -40) adaptiveThreshold = -40; } } if(currentFreq > scanEnd) currentFreq = scanStart; radio.setFrequency(currentFreq); radio.startListening(); delay(30); int rssi = readRssi(); char buf[128]; snprintf(buf,sizeof(buf),"{\"type\":\"SCAN\",\"freq\":%.2f,\"rssi\":%d,\"noise\":%d}", currentFreq, rssi, noiseFloor); ws.textAll(buf); currentFreq += scanStep; }
+void performAdaptiveScan() {
+  if(noiseSamples < 20) {
+    byte raw = readRssiReg();
+    int dbm = (int)(0.5f*raw)-131;
+    noiseSum += dbm; noiseSamples++;
+    if(noiseSamples == 20) {
+      noiseFloor = noiseSum / 20;
+      adaptiveThreshold = noiseFloor + 10;
+      if(adaptiveThreshold > -40) adaptiveThreshold = -40;
+    }
+  }
+  if(currentFreq > scanEnd) currentFreq = scanStart;
+  radio.setFrequency(currentFreq);
+  radio.startListening();
+  delay(30);
+  int rssi = readRssi();
+  char buf[128];
+  snprintf(buf,sizeof(buf),"{\"type\":\"SCAN\",\"freq\":%.2f,\"rssi\":%d,\"noise\":%d}", currentFreq, rssi, noiseFloor);
+  ws.textAll(buf);
+  currentFreq += scanStep;
+}
 
 // ==================== Tracker ====================
 void performTracker() { if(!trackerEnabled || trackerFreq == 0) return; if(millis() - lastTrackerUpdate < TRACKER_INTERVAL) return; lastTrackerUpdate = millis(); radio.setFrequency(trackerFreq); radio.startListening(); delay(30); int rssi = readRssi(); char buf[96]; snprintf(buf,sizeof(buf),"{\"type\":\"SCAN\",\"freq\":%.2f,\"rssi\":%d}", trackerFreq, rssi); ws.textAll(buf); }
@@ -869,28 +862,32 @@ void nrfInitPipes() {
 
 void nrfApplyConfig() {
   nrf.setChannel(nrfChannel);
-  uint8_t drv = RF24_1MBPS;
+
+  rf24_datarate_e drv = RF24_1MBPS;
   if(nrfDataRate == 0) drv = RF24_250KBPS;
   else if(nrfDataRate == 2) drv = RF24_2MBPS;
   nrf.setDataRate(drv);
+
   uint8_t plv = RF24_PA_LOW;
   if(nrfPowerLevel == 0) plv = RF24_PA_MIN;
   else if(nrfPowerLevel == 1) plv = RF24_PA_LOW;
   else if(nrfPowerLevel == 2) plv = RF24_PA_HIGH;
   else if(nrfPowerLevel == 3) plv = RF24_PA_MAX;
   nrf.setPALevel(plv);
+
   nrf.setAutoAck(0, nrfAutoAck);
-  uint8_t crc = RF24_CRC_DISABLED;
+
+  rf24_crclength_e crc = RF24_CRC_DISABLED;
   if(nrfCrcLength == 1) crc = RF24_CRC_8;
   else if(nrfCrcLength == 2) crc = RF24_CRC_16;
   nrf.setCRCLength(crc);
+
   nrf.setPayloadSize(nrfPayloadSize);
   nrfInitPipes();
   nrf.startListening();
 }
 
 void nrfStartScan() {
-  // Scan all 126 channels
   for(int ch = 0; ch <= 125; ch++) {
     if(!nrfScanning) return;
     nrf.setChannel(ch);
@@ -1065,9 +1062,7 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
   else if(cmd=="DIAG_SPI"){ byte v1=readRegister(0x00); byte v2=readRegister(0x31); char buf[160]; snprintf(buf,sizeof(buf),"<div>0x00 = 0x%02X</div><div>0x31 = 0x%02X</div>",v1,v2); String str=String(buf); if(v1==0x08||v2==0x08) str+="<div class='diag-ok'>✅ SPI OK</div>"; else str+="<div class='diag-fail'>❌ SPI FAIL</div>"; sendSpiOutput(str); }
   else if(cmd=="TOGGLE_WEBHOOK"){ webhookEnabled=!webhookEnabled; savePrefs(); char buf[64]; snprintf(buf,sizeof(buf),"{\"type\":\"WEBHOOK\",\"on\":%s}", webhookEnabled?"true":"false"); ws.textAll(buf); }
   else if(cmd.startsWith("SAVE_WEBHOOK:")){ String url=cmd.substring(13); strncpy(webhookUrl,url.c_str(),127); savePrefs(); sendStatus("✅ Webhook ذخیره شد"); }
-  // nRF24 commands
   else if(cmd.startsWith("NRF_CONFIG:")){
-    // NRF_CONFIG:ch:dr:pw:ack:crc:addr:pl
     int p1=cmd.indexOf(':',11); int p2=cmd.indexOf(':',p1+1); int p3=cmd.indexOf(':',p2+1);
     int p4=cmd.indexOf(':',p3+1); int p5=cmd.indexOf(':',p4+1); int p6=cmd.indexOf(':',p5+1);
     if(p1>0 && p2>0 && p3>0 && p4>0 && p5>0 && p6>0){
@@ -1078,7 +1073,6 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
       nrfCrcLength=cmd.substring(p4+1,p5).toInt();
       String addrStr=cmd.substring(p5+1,p6);
       nrfPayloadSize=cmd.substring(p6+1).toInt();
-      // Parse hex address
       addrStr.replace(" ","");
       if(addrStr.length()==10){
         for(int i=0;i<5;i++){
@@ -1094,13 +1088,7 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
   }
   else if(cmd=="NRF_SCAN_START"){ nrfScanning=true; sendStatus("اسکن nRF شروع شد"); }
   else if(cmd=="NRF_SCAN_STOP"){ nrfScanning=false; sendStatus("اسکن nRF متوقف شد"); }
-  else if(cmd.startsWith("NRF_SNIFF_START:")){
-    int pipe=cmd.substring(16).toInt();
-    nrfSniffing=true;
-    nrfApplyConfig();
-    nrf.startListening();
-    sendStatus("nRF Sniffer فعال (Pipe "+String(pipe)+")");
-  }
+  else if(cmd.startsWith("NRF_SNIFF_START:")){ int pipe=cmd.substring(16).toInt(); (void)pipe; nrfSniffing=true; nrfApplyConfig(); nrf.startListening(); sendStatus("nRF Sniffer فعال"); }
   else if(cmd=="NRF_SNIFF_STOP"){ nrfSniffing=false; nrf.stopListening(); sendStatus("nRF Sniffer غیرفعال"); }
   else if(cmd.startsWith("NRF_TX_TEXT:")){ String txt=cmd.substring(12); nrfSendText(txt); }
   else if(cmd.startsWith("NRF_TX_HEX:")){ String hex=cmd.substring(11); nrfSendHex(hex); }
@@ -1111,10 +1099,6 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
   else if(cmd=="NRF_STOP_ALL"){ nrfScanning=false; nrfSniffing=false; nrfJamming=false; nrf.stopListening(); }
   else if(cmd=="NRF_TEST"){
     String out="";
-    // Read a couple of RF24 registers to confirm communication
-    uint8_t status = nrf.get_status();
-    char buf[64]; snprintf(buf, sizeof(buf), "<div>RF24 STATUS: 0x%02X</div>", status);
-    out += buf;
     if(nrf.isChipConnected()) out += "<div class='diag-ok'>✅ nRF24 متصل است</div>";
     else out += "<div class='diag-fail'>❌ nRF24 متصل نیست</div>";
     sendNrfTestOut(out);
@@ -1130,10 +1114,9 @@ void setup(){
   if(!LittleFS.begin(true)) Serial.println("FS failed");
   loadIndex(); loadPrefs(); reinitRadio();
 
-  // Init nRF24 on HSPI (separate from VSPI used by Si4432)
-  hspi.begin(HSPI_SCK, HSPI_MISO, HSPI_MOSI, -1);
+  // Init nRF24 on VSPI (shares SCK/MISO/MOSI with Si4432, separate CS)
   delay(50);
-  if(nrf.begin(&hspi)) {
+  if(nrf.begin()) {
     Serial.println("[nRF24] OK");
     nrfApplyConfig();
   } else {
@@ -1159,12 +1142,9 @@ void loop(){
     if(trackerEnabled) performTracker();
     if(scanning){ if(adaptiveScanEnabled) performAdaptiveScan(); else doScan(); }
     if(recState) doRecord();
-
-    // nRF24 tasks
     if(nrfScanning) nrfStartScan();
     if(nrfSniffing) nrfReceive();
     if(nrfJamming) nrfJam();
-
     delay(1);
   }
 }
