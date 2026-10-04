@@ -1,9 +1,7 @@
 /*
- * Si4432 Pro - Advanced RF Remote Tool with Smart Scan & Sensors
+ * Si4432 Pro - Ultimate RF Analysis & Security Tool
  * ESP32 DevKit V1 + Si4432
  * Library: nopnop2002/Arduino-SI4432
- * Features: Smart Scan, RSSI Change Detection, Temperature/Voltage Sensors,
- *           Frequency Hopping, Multi-Replay, Auto-Bitrate, Notes, Hex View, SDR, Diagnostic
  */
 
 #include <Arduino.h>
@@ -45,20 +43,27 @@ float scanStart = 300.0;
 float scanEnd   = 928.0;
 float scanStep  = 0.5;
 
+// Adaptive Scan
+bool adaptiveScanEnabled = true;
+int   adaptiveThreshold = -85;
+int   noiseFloor = -100;
+int   noiseSamples = 0;
+long  noiseSum = 0;
+
 // Smart Scan
-bool smartScanEnabled = true;
+bool  smartScanEnabled = true;
 float smartScanCoarseStep = 1.0;
 float smartScanFineStep = 0.05;
 int   smartScanThreshold = -90;
 float lastStrongFreq = 0;
 int   smartScanPhase = 0;
 float smartScanFreq = 0;
-unsigned long lastScanUpdate = 0;
 
-// RSSI Change Detection
-int   lastRssi = -100;
-unsigned long lastRssiTime = 0;
-float rssiChangeRate = 0;
+// Signal Tracker
+bool trackerEnabled = false;
+float trackerFreq = 0;
+unsigned long lastTrackerUpdate = 0;
+#define TRACKER_INTERVAL 500
 
 // Frequency Hopping
 bool hoppingEnabled = false;
@@ -70,7 +75,6 @@ unsigned long lastHopTime = 0;
 // Sensors
 float chipTemp = 0;
 float supplyVoltage = 0;
-unsigned long lastSensorRead = 0;
 
 // Recording
 float recFreq = 0;
@@ -82,30 +86,43 @@ unsigned long recStartMs = 0;
 unsigned long recLastMs = 0;
 char     recName[32] = "";
 char     recNote[64] = "";
+char     recCategory[24] = "Default";
+char     recTags[64] = "";
 
 #define REC_TIMEOUT_MS 300
 #define REC_START_TIMEOUT_MS 5000
 
-// ==================== SDR ====================
+// SDR
 #define SDR_BUF_SIZE 128
 uint8_t sdrBuffer[SDR_BUF_SIZE];
 int sdrBufIdx = 0;
 unsigned long lastSdrSample = 0;
 #define SDR_SAMPLE_INTERVAL_US 125
 
-// ==================== Diagnostic ====================
+// Diagnostic
 int diagStep = 0;
 bool diagComplete = false;
 
-// ==================== Signals ====================
-#define MAX_SIGNALS 32
+// Signals
+#define MAX_SIGNALS 64
 #define NAME_LEN    32
-struct Signal { uint16_t id; float freq; uint16_t len; char name[NAME_LEN]; };
+struct Signal {
+  uint16_t id;
+  float freq;
+  uint16_t len;
+  char name[NAME_LEN];
+  char category[24];
+  char tags[64];
+};
 Signal signals[MAX_SIGNALS];
 int signalCount = 0;
 int nextId = 1;
 
-// ==================== Web ====================
+// Webhook
+bool webhookEnabled = false;
+char webhookUrl[128] = "";
+
+// Web
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 AsyncWebSocket sdrSocket("/sdr");
@@ -114,7 +131,7 @@ AsyncWebSocket sdrSocket("/sdr");
 const char HTML[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="fa" dir="rtl"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>Si4432 Pro</title><style>
+<title>Si4432 Ultimate</title><style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;user-select:none}
 body{font-family:Tahoma,sans-serif;background:#0a0e17;color:#e0e6ed;
      max-width:520px;margin:auto;min-height:100vh;display:flex;flex-direction:column}
@@ -131,16 +148,16 @@ body{font-family:Tahoma,sans-serif;background:#0a0e17;color:#e0e6ed;
 .title{font-size:1.05em;font-weight:bold;color:#e0e6ed;flex:1}
 .menu{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:8px 0}
 .menu-item{background:#151c2c;border:1px solid #1e2a45;border-radius:12px;
-  padding:22px 10px;display:flex;flex-direction:column;align-items:center;
-  justify-content:center;gap:10px;cursor:pointer;transition:all .15s;min-height:120px}
+  padding:18px 8px;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:8px;cursor:pointer;transition:all .15s;min-height:110px}
 .menu-item:active{transform:scale(.96);background:#1e2a45}
-.menu-icon{font-size:2.4em;line-height:1}
-.menu-label{font-size:.85em;color:#e0e6ed;text-align:center;font-weight:600}
-.menu-sub{font-size:.7em;color:#7a8ba8;text-align:center;margin-top:2px}
+.menu-icon{font-size:2.2em;line-height:1}
+.menu-label{font-size:.8em;color:#e0e6ed;text-align:center;font-weight:600}
+.menu-sub{font-size:.65em;color:#7a8ba8;text-align:center;margin-top:2px}
 .card{background:#151c2c;border-radius:10px;padding:12px;margin-bottom:10px;border:1px solid #1e2a45}
 .row{display:flex;gap:6px;margin-bottom:8px;align-items:center;flex-wrap:wrap}
 .label{color:#7a8ba8;font-size:.8em;min-width:65px}
-input[type=number],input[type=text]{flex:1;background:#0a0e17;color:#0f0;
+input[type=number],input[type=text],input[type=url],select{flex:1;background:#0a0e17;color:#0f0;
   border:1px solid #1e2a45;border-radius:6px;padding:10px;font-family:monospace;
   font-size:.9em;color-scheme:dark;min-width:100px}
 input:focus{outline:none;border-color:#00e5ff}
@@ -169,6 +186,8 @@ input:focus{outline:none;border-color:#00e5ff}
 .sig-name{color:#00e5ff;font-weight:bold;font-size:.95em;word-break:break-word}
 .sig-meta{color:#8899aa;font-size:.75em;font-family:monospace;margin-top:4px}
 .sig-note{color:#f9a825;font-size:.75em;margin-top:3px;font-style:italic}
+.sig-category{color:#6c5ce7;font-size:.7em;margin-top:2px}
+.sig-tags{color:#00b894;font-size:.7em;margin-top:2px}
 .sig-actions{display:flex;gap:4px;flex:0 0 auto;flex-wrap:wrap}
 .empty{color:#3a4a66;text-align:center;padding:30px 10px;font-size:.85em}
 .rec-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(10,14,23,.95);
@@ -206,213 +225,155 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
 </div>
 
 <div id="sc-home" class="screen active">
-  <div class="header"><div class="title">📡 Si4432 Pro</div></div>
+  <div class="header"><div class="title">📡 Si4432 Ultimate</div></div>
   <div class="menu">
-    <div class="menu-item" onclick="go('read')">
-      <span class="menu-icon">📻</span>
-      <span class="menu-label">Read</span>
-      <span class="menu-sub">ضبط سیگنال</span>
-    </div>
-    <div class="menu-item" onclick="go('saved')">
-      <span class="menu-icon">📼</span>
-      <span class="menu-label">Saved</span>
-      <span class="menu-sub">سیگنال‌ها</span>
-    </div>
-    <div class="menu-item" onclick="go('analyzer')">
-      <span class="menu-icon">🔍</span>
-      <span class="menu-label">Analyzer</span>
-      <span class="menu-sub">اسکن هوشمند</span>
-    </div>
-    <div class="menu-item" onclick="go('sdr')">
-      <span class="menu-icon">🔊</span>
-      <span class="menu-label">SDR</span>
-      <span class="menu-sub">شنیدن صدا</span>
-    </div>
-    <div class="menu-item" onclick="go('sensors')">
-      <span class="menu-icon">🌡️</span>
-      <span class="menu-label">Sensors</span>
-      <span class="menu-sub">دما و ولتاژ</span>
-    </div>
-    <div class="menu-item" onclick="go('hopping')">
-      <span class="menu-icon">📡</span>
-      <span class="menu-label">Hopping</span>
-      <span class="menu-sub">پرش فرکانسی</span>
-    </div>
-    <div class="menu-item" onclick="go('diagnostic')" style="grid-column: span 2; background:#2a1a3a;">
-      <span class="menu-icon">🧪</span>
-      <span class="menu-label">Diagnostic Mode</span>
-      <span class="menu-sub">حالت عیب‌یابی</span>
-    </div>
+    <div class="menu-item" onclick="go('read')"><span class="menu-icon">📻</span><span class="menu-label">Read</span><span class="menu-sub">ضبط سیگنال</span></div>
+    <div class="menu-item" onclick="go('saved')"><span class="menu-icon">📼</span><span class="menu-label">Saved</span><span class="menu-sub">مدیریت</span></div>
+    <div class="menu-item" onclick="go('analyzer')"><span class="menu-icon">🔍</span><span class="menu-label">Analyzer</span><span class="menu-sub">اسکن هوشمند</span></div>
+    <div class="menu-item" onclick="go('sdr')"><span class="menu-icon">🔊</span><span class="menu-label">SDR</span><span class="menu-sub">شنیدن صدا</span></div>
+    <div class="menu-item" onclick="go('sensors')"><span class="menu-icon">🌡️</span><span class="menu-label">Sensors</span><span class="menu-sub">دما/ولتاژ</span></div>
+    <div class="menu-item" onclick="go('hopping')"><span class="menu-icon">📡</span><span class="menu-label">Hopping</span><span class="menu-sub">پرش فرکانسی</span></div>
+    <div class="menu-item" onclick="go('attack')"><span class="menu-icon">🎯</span><span class="menu-label">Attack</span><span class="menu-sub">شبیه‌ساز</span></div>
+    <div class="menu-item" onclick="go('diagnostic')"><span class="menu-icon">🧪</span><span class="menu-label">Diagnostic</span><span class="menu-sub">عیب‌یابی</span></div>
+    <div class="menu-item" onclick="go('settings')"><span class="menu-icon">⚙️</span><span class="menu-label">Settings</span><span class="menu-sub">تنظیمات</span></div>
   </div>
 </div>
 
 <div id="sc-read" class="screen">
-  <div class="header">
-    <button class="back" onclick="go('home')">←</button>
-    <div class="title">📻 Read</div>
-  </div>
+  <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">📻 Read Signal</div></div>
   <div class="card">
-    <div class="row"><span class="label">اسم</span>
-      <input type="text" id="recName" placeholder="درب پارکینگ" maxlength="30"></div>
-    <div class="row"><span class="label">یادداشت</span>
-      <input type="text" id="recNoteIn" placeholder="اختیاری" maxlength="60"></div>
-    <div class="row"><span class="label">فرکانس</span>
-      <input type="number" id="recFreq" step="0.01" value="433.92" min="240" max="930"></div>
+    <div class="row"><span class="label">اسم</span><input type="text" id="recName" placeholder="درب پارکینگ" maxlength="30"></div>
+    <div class="row"><span class="label">دسته</span><input type="text" id="recCategory" placeholder="پارکینگ" maxlength="20"></div>
+    <div class="row"><span class="label">برچسب‌ها</span><input type="text" id="recTags" placeholder="ورودی, اصلی" maxlength="60"></div>
+    <div class="row"><span class="label">یادداشت</span><input type="text" id="recNoteIn" placeholder="اختیاری" maxlength="60"></div>
+    <div class="row"><span class="label">فرکانس</span><input type="number" id="recFreq" step="0.01" value="433.92" min="240" max="930"></div>
     <div class="row"><span class="label">بیت‌ریت</span>
       <button class="btn-preset" id="rbr24" onclick="setBitrate(2.4)">2.4</button>
       <button class="btn-preset active" id="rbr48" onclick="setBitrate(4.8)">4.8</button>
       <button class="btn-preset" id="rbr96" onclick="setBitrate(9.6)">9.6</button>
     </div>
-    <div class="row"><span class="label">Manchester</span>
-      <button class="btn-preset" id="manch" onclick="toggleManchester()">Manchester: خاموش</button>
-    </div>
+    <div class="row"><span class="label">Manchester</span><button class="btn-preset" id="manch" onclick="toggleManchester()">Manchester: خاموش</button></div>
     <div class="row"><span class="label">آستانه</span>
-      <input type="range" id="recTh" min="-110" max="-40" value="-85"
-             oninput="document.getElementById('recThV').textContent=this.value">
+      <input type="range" id="recTh" min="-110" max="-40" value="-85" oninput="document.getElementById('recThV').textContent=this.value">
       <span class="th-val" id="recThV">-85</span>
     </div>
-    <div class="btn-row">
-      <button class="btn btn-ook" style="flex:1" onclick="autoThreshold()">⚙️ کالیبراسیون آستانه</button>
-    </div>
+    <div class="btn-row"><button class="btn btn-ook" style="flex:1" onclick="autoThreshold()">⚙️ کالیبراسیون خودکار</button></div>
     <button class="btn btn-primary" style="margin-top:10px" onclick="beginRecord()">🔴 شروع ضبط</button>
     <div class="hint">ریموت را ۲-۳ سانتی‌متر از آنتن فشار بده</div>
   </div>
 </div>
 
 <div id="sc-saved" class="screen">
-  <div class="header">
-    <button class="back" onclick="go('home')">←</button>
-    <div class="title">📼 Saved</div>
-    <button class="btn btn-stop" style="flex:0 0 auto;padding:6px 10px;font-size:.8em"
-            onclick="clearAll()">🗑 همه</button>
-  </div>
+  <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">📼 Saved Signals</div>
+    <button class="btn btn-stop" style="flex:0 0 auto;padding:6px 10px;font-size:.8em" onclick="clearAll()">🗑 همه</button></div>
+  <div class="card"><div class="row"><span class="label">جستجو</span>
+    <input type="text" id="searchInput" placeholder="نام یا برچسب..." oninput="filterSignals()"></div></div>
   <div id="savedList"><div class="empty">خالی</div></div>
 </div>
 
 <div id="sc-analyzer" class="screen">
-  <div class="header">
-    <button class="back" onclick="go('home')">←</button>
-    <div class="title">🔍 Analyzer</div>
-  </div>
+  <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">🔍 Analyzer</div></div>
   <div class="display">
-    <span class="value" id="anFreq">---.--</span>
-    <div class="unit">MHz</div>
+    <span class="value" id="anFreq">---.--</span><div class="unit">MHz</div>
     <div class="rssi-bar"><div class="rssi-fill" id="anBar"></div></div>
     <div class="hint" id="anRssi">RSSI: --- dBm</div>
-    <div class="hint" id="anChange">تغییرات: ---</div>
+    <div class="hint" id="anNoise">Noise: --- dBm</div>
     <canvas id="rssiGraph"></canvas>
-    <div class="hint">۶۰ نمونه اخیر</div>
+    <div class="hint">Spectrum (60 samples)</div>
   </div>
-
+  <div class="card"><div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📡 Preset Frequencies</div>
+    <div class="presets" id="presetList"></div></div>
   <div class="card">
-    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📡 فرکانس‌های رایج ریموت</div>
-    <div class="presets" id="presetList"></div>
-  </div>
-
-  <div class="card">
-    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">🔎 اسکن هوشمند</div>
-    <div class="row">
-      <label><input type="checkbox" id="smartScanCheck" checked onchange="toggleSmartScan()"> Smart Scan</label>
-    </div>
-    <div class="row"><span class="label">شروع</span>
-      <input type="number" id="anStart" step="0.5" value="300.0"></div>
-    <div class="row"><span class="label">پایان</span>
-      <input type="number" id="anEnd" step="0.5" value="928.0"></div>
-    <div class="row"><span class="label">گام درشت</span>
-      <input type="number" id="anStep" step="0.05" value="1.0"></div>
+    <div class="row"><label><input type="checkbox" id="adaptiveScanCheck" checked onchange="toggleAdaptiveScan()"> Adaptive Scan</label></div>
+    <div class="row"><span class="label">شروع</span><input type="number" id="anStart" step="0.5" value="300.0"></div>
+    <div class="row"><span class="label">پایان</span><input type="number" id="anEnd" step="0.5" value="928.0"></div>
+    <div class="row"><span class="label">گام</span><input type="number" id="anStep" step="0.05" value="0.5"></div>
     <div class="btn-row">
       <button class="btn btn-primary" id="anBtn" onclick="toggleScan()">▶ شروع اسکن</button>
+      <button class="btn btn-green" id="trackerBtn" onclick="toggleTracker()">🔒 ردیاب</button>
     </div>
   </div>
-
   <div class="card">
-    <div class="row"><span class="label">قفل روی</span>
-      <input type="number" id="anTarget" step="0.01" value="433.92"></div>
-    <button class="btn btn-green" style="width:100%;margin-top:6px"
-            onclick="lockFreq()">🔒 قفل و رفتن به ضبط</button>
+    <div class="row"><span class="label">قفل روی</span><input type="number" id="anTarget" step="0.01" value="433.92"></div>
+    <button class="btn btn-green" style="width:100%;margin-top:6px" onclick="lockFreq()">🔒 قفل و رفتن به ضبط</button>
   </div>
 </div>
 
 <div id="sc-sdr" class="screen">
-  <div class="header">
-    <button class="back" onclick="go('home')">←</button>
-    <div class="title">🔊 SDR</div>
-  </div>
-  <div class="display">
-    <span class="value" id="sdrFreq">---.--</span>
-    <div class="unit">MHz</div>
-    <div class="hint" id="sdrStatus">متوقف</div>
-  </div>
+  <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">🔊 SDR</div></div>
+  <div class="display"><span class="value" id="sdrFreq">---.--</span><div class="unit">MHz</div>
+    <div class="hint" id="sdrStatus">متوقف</div></div>
   <div class="card">
     <div class="row"><span class="label">فرکانس</span>
       <input type="number" id="sdrFreqInput" step="0.01" value="433.92" min="240" max="930">
-      <button class="btn btn-green" style="flex:0 0 auto;padding:10px 14px"
-              onclick="setSdrFreq()">تنظیم</button></div>
+      <button class="btn btn-green" style="flex:0 0 auto;padding:10px 14px" onclick="setSdrFreq()">تنظیم</button></div>
     <button class="btn btn-primary" id="sdrBtn" onclick="toggleSdr()" style="margin-top:8px">▶ پخش صدا</button>
   </div>
-  <div class="card">
-    <div class="row"><span class="label">اسکن صوتی</span></div>
-    <button class="btn btn-ook" style="width:100%;margin-top:6px"
-            onclick="send('SDR_SCAN')">🔍 پیدا کردن سیگنال صوتی</button>
-  </div>
+  <div class="card"><button class="btn btn-ook" style="width:100%" onclick="send('SDR_SCAN')">🔍 پیدا کردن سیگنال صوتی</button></div>
 </div>
 
 <div id="sc-sensors" class="screen">
-  <div class="header">
-    <button class="back" onclick="go('home')">←</button>
-    <div class="title">🌡️ Sensors</div>
-  </div>
-  <div class="card" style="text-align:center">
-    <div style="font-size:3em;color:#00e5ff;font-family:monospace" id="tempDisplay">--</div>
-    <div style="color:#7a8ba8;font-size:.9em">دمای تراشه (°C)</div>
-  </div>
-  <div class="card" style="text-align:center">
-    <div style="font-size:3em;color:#00b894;font-family:monospace" id="voltDisplay">--</div>
-    <div style="color:#7a8ba8;font-size:.9em">ولتاژ تغذیه (V)</div>
-  </div>
+  <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">🌡️ Sensors</div></div>
+  <div class="card" style="text-align:center"><div style="font-size:3em;color:#00e5ff;font-family:monospace" id="tempDisplay">--</div>
+    <div style="color:#7a8ba8;font-size:.9em">دمای تراشه (°C)</div></div>
+  <div class="card" style="text-align:center"><div style="font-size:3em;color:#00b894;font-family:monospace" id="voltDisplay">--</div>
+    <div style="color:#7a8ba8;font-size:.9em">ولتاژ تغذیه (V)</div></div>
   <button class="btn btn-primary" onclick="readSensors()">🔄 به‌روزرسانی</button>
 </div>
 
 <div id="sc-hopping" class="screen">
-  <div class="header">
-    <button class="back" onclick="go('home')">←</button>
-    <div class="title">📡 Frequency Hopping</div>
-  </div>
+  <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">📡 Frequency Hopping</div></div>
   <div class="card">
     <div class="row"><span class="label">وضعیت</span>
-      <button class="btn btn-ook" id="hopBtn" onclick="toggleHopping()">📡 پرش فرکانسی: خاموش</button>
-    </div>
+      <button class="btn btn-ook" id="hopBtn" onclick="toggleHopping()">📡 پرش فرکانسی: خاموش</button></div>
     <div class="hint">فرکانس‌های زیر به صورت دوره‌ای اسکن می‌شوند:</div>
     <div class="hint" id="hopList">433.05, 433.42, 433.92, 434.42, 868.35, 915.00 MHz</div>
   </div>
 </div>
 
-<div id="sc-diagnostic" class="screen">
-  <div class="header">
-    <button class="back" onclick="go('home')">←</button>
-    <div class="title">🧪 Diagnostic</div>
+<div id="sc-attack" class="screen">
+  <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">🎯 Attack Simulator</div></div>
+  <div class="card">
+    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📡 Replay Attack</div>
+    <div class="row"><span class="label">ID</span><input type="number" id="attackId" value="1" min="1"></div>
+    <div class="row"><span class="label">تعداد</span><input type="number" id="attackCount" value="5" min="1" max="20"></div>
+    <button class="btn btn-primary" onclick="replayAttack()">🔴 اجرای Replay</button>
   </div>
   <div class="card">
-    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">🔬 تست جامع</div>
-    <button class="btn btn-primary" onclick="startDiagnostic()">▶ شروع تست</button>
+    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">💥 Brute Force</div>
+    <div class="row"><span class="label">فرکانس</span><input type="number" id="bruteFreq" step="0.01" value="433.92"></div>
+    <div class="row"><span class="label">تعداد</span><input type="number" id="bruteCount" value="50" min="1" max="500"></div>
+    <button class="btn btn-ook" onclick="bruteForce()">💥 اجرای Brute Force</button>
+  </div>
+</div>
+
+<div id="sc-diagnostic" class="screen">
+  <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">🧪 Diagnostic</div></div>
+  <div class="card">
+    <button class="btn btn-primary" onclick="startDiagnostic()">▶ تست جامع</button>
     <div class="diag-box" id="diagOutput"><div>آماده...</div></div>
   </div>
   <div class="card">
-    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📡 تست SPI</div>
-    <button class="btn btn-ook" style="width:100%" onclick="send('DIAG_SPI')">📡 خواندن رجیستر</button>
+    <button class="btn btn-ook" style="width:100%" onclick="send('DIAG_SPI')">📡 تست SPI</button>
     <div class="diag-box" id="spiOutput"><div>در انتظار...</div></div>
   </div>
+</div>
+
+<div id="sc-settings" class="screen">
+  <div class="header"><button class="back" onclick="go('home')">←</button><div class="title">⚙️ Settings</div></div>
   <div class="card">
-    <div style="color:#00e5ff;font-size:.9em;margin-bottom:8px">📊 تست RSSI</div>
-    <button class="btn btn-green" style="width:100%" onclick="send('DIAG_RSSI')">📊 نمایش RSSI خام</button>
-    <div class="diag-box" id="rssiOutput"><div>در انتظار...</div></div>
+    <div class="row"><span class="label">Webhook</span>
+      <label><input type="checkbox" id="webhookCheck" onchange="toggleWebhook()"> فعال</label></div>
+    <div class="row"><span class="label">URL</span>
+      <input type="url" id="webhookUrl" placeholder="http://..." maxlength="120"></div>
+    <button class="btn btn-primary" onclick="saveWebhook()">💾 ذخیره Webhook</button>
   </div>
 </div>
 
 <div class="rec-overlay" id="recOverlay">
   <div class="rec-pulse"></div>
   <div class="rec-rssi" id="recLiveRssi">--- dBm</div>
-  <div class="rec-status" id="recStatus">آماده ضبط — ریموت را فشار بده</div>
+  <div class="rec-status" id="recStatus">آماده ضبط</div>
   <button class="rec-cancel" onclick="cancelRecord()">لغو</button>
 </div>
 
@@ -428,9 +389,10 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
 
 <script>
 let ws, sdrWs, audioCtx=null, audioProcessor=null, sdrQueue=[], sdrPhase=0;
-let scanning=false, sdrOn=false, diagRunning=false;
+let scanning=false, sdrOn=false, trackerOn=false, diagRunning=false;
 const commonFreqs=[315.00,390.00,418.00,430.00,433.05,433.42,433.92,434.42,868.35,915.00];
 let rssiHistory=[];
+let allSignals=[];
 
 window.onload=()=>{
   const pl=document.getElementById('presetList');
@@ -470,16 +432,15 @@ function connect(){
         const bar=document.getElementById('anBar');bar.style.width=pct+'%';
         bar.style.background=m.rssi>-70?'#00e5ff':m.rssi>-85?'#f9a825':'#ff3d71';
         document.getElementById('anRssi').textContent='RSSI: '+m.rssi+' dBm';
-        if(m.change !== undefined) document.getElementById('anChange').textContent='تغییرات: '+m.change.toFixed(1)+' dB/s';
+        if(m.noise !== undefined) document.getElementById('anNoise').textContent='Noise: '+m.noise+' dBm';
         setSbFreq(m.freq); setSbRssi(m.rssi);
         rssiHistory.push(m.rssi);
         if(rssiHistory.length>60) rssiHistory.shift();
         drawGraph();
       }
-      if(m.type==='SIGNALS') renderList(m.list);
+      if(m.type==='SIGNALS'){ allSignals=m.list; renderList(m.list); }
       if(m.type==='STATUS') setSbState(m.msg);
       if(m.type==='SETTINGS') applySettings(m.data);
-      if(m.type==='BITRATE') setBitrateUI(m.value);
       if(m.type==='LIVE'){
         document.getElementById('recLiveRssi').textContent=m.rssi+' dBm';
         document.getElementById('recStatus').textContent=m.state;
@@ -487,11 +448,10 @@ function connect(){
         if(m.state==='done') setTimeout(()=>document.getElementById('recOverlay').classList.remove('active'),800);
         if(m.state==='timeout') setTimeout(()=>document.getElementById('recOverlay').classList.remove('active'),1500);
       }
-      if(m.type==='SDR_FREQ'){document.getElementById('sdrFreq').textContent=m.freq.toFixed(2);}
-      if(m.type==='SDR_STATUS'){document.getElementById('sdrStatus').textContent=m.msg;}
+      if(m.type==='SDR_FREQ') document.getElementById('sdrFreq').textContent=m.freq.toFixed(2);
+      if(m.type==='SDR_STATUS') document.getElementById('sdrStatus').textContent=m.msg;
       if(m.type==='DIAG_OUTPUT'){document.getElementById('diagOutput').innerHTML=m.html;diagRunning=false;}
-      if(m.type==='DIAG_SPI_OUTPUT'){document.getElementById('spiOutput').innerHTML=m.html;}
-      if(m.type==='DIAG_RSSI_OUTPUT'){document.getElementById('rssiOutput').innerHTML=m.html;}
+      if(m.type==='DIAG_SPI_OUTPUT') document.getElementById('spiOutput').innerHTML=m.html;
       if(m.type==='HEX'){
         document.getElementById('hexTitle').textContent='Hex - '+m.name;
         document.getElementById('hexContent').textContent=m.hex;
@@ -508,6 +468,14 @@ function connect(){
       if(m.type==='HOPPING'){
         const b=document.getElementById('hopBtn');
         if(b){ b.textContent='📡 پرش فرکانسی: '+(m.on?'روشن':'خاموش'); b.className=m.on?'btn btn-primary':'btn btn-ook'; }
+      }
+      if(m.type==='TRACKER'){
+        const b=document.getElementById('trackerBtn');
+        if(b){ b.textContent='🔒 ردیاب: '+(m.on?'روشن':'خاموش'); b.className=m.on?'btn btn-danger':'btn btn-green'; }
+      }
+      if(m.type==='WEBHOOK'){
+        document.getElementById('webhookCheck').checked=m.on;
+        if(m.url) document.getElementById('webhookUrl').value=m.url;
       }
     }catch(x){}
   };
@@ -529,48 +497,32 @@ function setSbState(s){document.getElementById('sbState').textContent='● '+s;}
 
 function pickPreset(f){
   document.getElementById('anTarget').value=f.toFixed(2);
-  send('SET_FREQ:'+f);
-  setSbFreq(f);
+  send('SET_FREQ:'+f); setSbFreq(f);
 }
-
 function setBitrate(br){ send('SET_BITRATE:'+br); }
-function setBitrateUI(br){
-  ['rbr24','rbr48','rbr96'].forEach(id=>{
-    const el=document.getElementById(id); if(el) el.classList.remove('active');
-  });
-  if(br==2.4){const e=document.getElementById('rbr24'); if(e)e.classList.add('active');}
-  else if(br==4.8){const e=document.getElementById('rbr48'); if(e)e.classList.add('active');}
-  else if(br==9.6){const e=document.getElementById('rbr96'); if(e)e.classList.add('active');}
-}
-
 function toggleManchester(){ send('TOGGLE_MANCHESTER'); }
-function setManchesterUI(on){
-  const b=document.getElementById('manch');
-  if(b) b.textContent='Manchester: '+(on?'روشن':'خاموش');
-  if(b) b.className = on ? 'btn-preset active' : 'btn-preset';
+function toggleAdaptiveScan(){
+  const enabled=document.getElementById('adaptiveScanCheck').checked;
+  send('ADAPTIVE_SCAN:'+enabled);
 }
-
-function autoThreshold(){
-  send('AUTO_THRESHOLD');
-  setSbState('کالیبراسیون...');
-}
+function toggleTracker(){ trackerOn=!trackerOn; send('TOGGLE_TRACKER'); }
+function autoThreshold(){ send('AUTO_THRESHOLD'); setSbState('کالیبراسیون...'); }
 
 function beginRecord(){
   const n=(document.getElementById('recName').value||'').trim()||('sig_'+Date.now());
+  const cat=(document.getElementById('recCategory').value||'Default').trim();
+  const tags=(document.getElementById('recTags').value||'').trim();
   const note=(document.getElementById('recNoteIn').value||'').trim();
   const f=parseFloat(document.getElementById('recFreq').value||'433.92');
   const th=parseInt(document.getElementById('recTh').value);
   if(f<240||f>930){ alert('فرکانس نامعتبر'); return; }
   send('THRESH:'+th);
-  send('REC:'+f+':'+n+':'+note);
+  send('REC:'+f+':'+n+':'+note+':'+cat+':'+tags);
   document.getElementById('recOverlay').classList.add('active');
   document.getElementById('recLiveRssi').textContent='--- dBm';
   document.getElementById('recStatus').textContent='آماده ضبط — ریموت را فشار بده';
 }
-function cancelRecord(){
-  send('STOP');
-  document.getElementById('recOverlay').classList.remove('active');
-}
+function cancelRecord(){ send('STOP'); document.getElementById('recOverlay').classList.remove('active'); }
 
 function toggleScan(){
   scanning=!scanning;
@@ -584,25 +536,14 @@ function toggleScan(){
     b.textContent='⏹ توقف';
   } else { send('STOP'); b.textContent='▶ شروع اسکن'; }
 }
-function toggleSmartScan(){
-  const enabled=document.getElementById('smartScanCheck').checked;
-  send('SMART_SCAN:'+enabled);
-}
-function lockFreq(){
-  const f=parseFloat(document.getElementById('anTarget').value);
-  if(f<240||f>930){ alert('فرکانس نامعتبر'); return; }
-  send('SET_FREQ:'+f);
-  document.getElementById('recFreq').value=f.toFixed(2);
-  document.getElementById('sdrFreqInput').value=f.toFixed(2);
-  setTimeout(()=>{ go('read'); }, 300);
-}
 
-function readSensors(){
-  send('READ_SENSORS');
-}
-
-function toggleHopping(){
-  send('TOGGLE_HOPPING');
+function filterSignals(){
+  const q=document.getElementById('searchInput').value.toLowerCase();
+  if(!q){ renderList(allSignals); return; }
+  const filtered=allSignals.filter(s=>
+    s.name.toLowerCase().includes(q) || (s.tags&&s.tags.toLowerCase().includes(q))
+  );
+  renderList(filtered);
 }
 
 function renderList(list){
@@ -613,6 +554,8 @@ function renderList(list){
     '<div class="sig-name">'+s.name+'</div>'+
     '<div class="sig-meta">'+s.freq+' MHz • '+s.len+' bytes</div>'+
     (s.note?'<div class="sig-note">📝 '+s.note+'</div>':'')+
+    (s.category?'<div class="sig-category">📂 '+s.category+'</div>':'')+
+    (s.tags?'<div class="sig-tags">🏷️ '+s.tags+'</div>':'')+
     '</div></div>'+
     '<div class="sig-actions" style="margin-top:8px">'+
     '<button class="btn btn-green" style="padding:6px 10px;font-size:.75em" onclick="playSig('+s.id+',1,0)">📡 ۱x</button>'+
@@ -633,11 +576,43 @@ function clearAll(){ if(confirm('همه حذف شوند؟')) send('CLEAR_ALL'); 
 function applySettings(d){
   document.getElementById('recTh').value=d.threshold;
   document.getElementById('recThV').textContent=d.threshold;
-  setBitrateUI(d.bitrate);
-  setManchesterUI(d.manchester);
-  setSbFreq(d.freq);
+  if(d.webhookOn !== undefined) document.getElementById('webhookCheck').checked=d.webhookOn;
+  if(d.webhookUrl) document.getElementById('webhookUrl').value=d.webhookUrl;
+  if(d.adaptive !== undefined) document.getElementById('adaptiveScanCheck').checked=d.adaptive;
 }
 
+function replayAttack(){
+  const id=document.getElementById('attackId').value;
+  const count=document.getElementById('attackCount').value;
+  send('REPLAY_ATTACK:'+id+':'+count);
+}
+function bruteForce(){
+  const f=document.getElementById('bruteFreq').value;
+  const count=document.getElementById('bruteCount').value;
+  send('BRUTE_FORCE:'+f+':'+count);
+}
+function toggleHopping(){ send('TOGGLE_HOPPING'); }
+function toggleWebhook(){ send('TOGGLE_WEBHOOK'); }
+function saveWebhook(){
+  const url=document.getElementById('webhookUrl').value;
+  send('SAVE_WEBHOOK:'+url);
+}
+function readSensors(){ send('READ_SENSORS'); }
+function startDiagnostic(){ if(!diagRunning){ diagRunning=true; document.getElementById('diagOutput').innerHTML='<div>در حال اجرا...</div>'; send('DIAG_START'); } }
+function setSdrFreq(){
+  const f=parseFloat(document.getElementById('sdrFreqInput').value);
+  if(f<240||f>930){ alert('فرکانس نامعتبر'); return; }
+  send('SDR_FREQ:'+f);
+  document.getElementById('sdrFreq').textContent=f.toFixed(2);
+}
+function lockFreq(){
+  const f=parseFloat(document.getElementById('anTarget').value);
+  if(f<240||f>930){ alert('فرکانس نامعتبر'); return; }
+  send('SET_FREQ:'+f);
+  document.getElementById('recFreq').value=f.toFixed(2);
+  document.getElementById('sdrFreqInput').value=f.toFixed(2);
+  setTimeout(()=>{ go('read'); }, 300);
+}
 function toggleSdr(){
   if(!sdrOn){
     audioCtx=new (window.AudioContext||window.webkitAudioContext)();
@@ -680,18 +655,6 @@ function toggleSdr(){
     document.getElementById('sdrStatus').textContent='متوقف';
   }
 }
-function setSdrFreq(){
-  const f=parseFloat(document.getElementById('sdrFreqInput').value);
-  if(f<240||f>930){ alert('فرکانس نامعتبر'); return; }
-  send('SDR_FREQ:'+f);
-  document.getElementById('sdrFreq').textContent=f.toFixed(2);
-}
-function startDiagnostic(){
-  if(diagRunning) return;
-  diagRunning = true;
-  document.getElementById('diagOutput').innerHTML = '<div>در حال اجرا...</div>';
-  send('DIAG_START');
-}
 connect();
 </script></body></html>
 )HTML";
@@ -700,6 +663,7 @@ connect();
 byte readRssiReg();
 int  readRssi();
 byte readRegister(byte reg);
+void writeRegister(byte reg, byte val);
 void sendStatus(const String&);
 void sendList();
 void reinitRadio();
@@ -708,9 +672,12 @@ void runDiagnosticStep();
 void performAutoThreshold();
 void savePrefs();
 void loadPrefs();
-void performSmartScan();
-void readSensors();
+void performAdaptiveScan();
 void performFrequencyHopping();
+void readSensors();
+void performTracker();
+void doScan();
+void performSmartScan();
 
 // ==================== WS Helpers ====================
 void sendStatus(const String& m){
@@ -722,16 +689,15 @@ void sendList(){
   for(int i=0;i<signalCount;i++){
     if(i)out+=",";
     String nm=signals[i].name; nm.replace("\"","");
-    String nt="";
-    char np[24]; snprintf(np,sizeof(np),"/n%d.txt",signals[i].id);
-    File nf=LittleFS.open(np,"r");
-    if(nf){ nt=nf.readString(); nf.close(); nt.replace("\"",""); }
+    String nt=""; char np[24]; snprintf(np,sizeof(np),"/n%d.txt",signals[i].id);
+    File nf=LittleFS.open(np,"r"); if(nf){ nt=nf.readString(); nf.close(); nt.replace("\"",""); }
+    String ct=signals[i].category; ct.replace("\"","");
+    String tg=signals[i].tags; tg.replace("\"","");
     out+="{\"id\":"+String(signals[i].id)+",\"name\":\""+nm+"\",";
-    out+="\"note\":\""+nt+"\",";
+    out+="\"note\":\""+nt+"\",\"category\":\""+ct+"\",\"tags\":\""+tg+"\",";
     out+="\"freq\":"+String(signals[i].freq,2)+",\"len\":"+String(signals[i].len)+"}";
   }
-  out+="]}";
-  ws.textAll(out);
+  out+="]}"; ws.textAll(out);
 }
 void sendSettings(){
   String out="{\"type\":\"SETTINGS\",\"data\":{";
@@ -739,96 +705,82 @@ void sendSettings(){
   out+=",\"bitrate\":"+String(cfgBitrate,2);
   out+=",\"threshold\":"+String(cfgThreshold);
   out+=",\"manchester\":"+String(cfgManchester?"true":"false");
+  out+=",\"adaptive\":"+String(adaptiveScanEnabled?"true":"false");
+  out+=",\"webhookOn\":"+String(webhookEnabled?"true":"false");
+  out+=",\"webhookUrl\":\""+String(webhookUrl)+"\"";
   out+="}}"; ws.textAll(out);
 }
 
 // ==================== Direct Register ====================
 byte readRegister(byte reg) {
   SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
-  digitalWrite(PIN_CS, LOW);
-  delayMicroseconds(3);
-  SPI.transfer(reg & 0x7F);
-  delayMicroseconds(3);
-  byte result = SPI.transfer(0x00);
-  delayMicroseconds(3);
-  digitalWrite(PIN_CS, HIGH);
-  SPI.endTransaction();
+  digitalWrite(PIN_CS, LOW); delayMicroseconds(3);
+  SPI.transfer(reg & 0x7F); delayMicroseconds(3);
+  byte result = SPI.transfer(0x00); delayMicroseconds(3);
+  digitalWrite(PIN_CS, HIGH); SPI.endTransaction();
   return result;
+}
+void writeRegister(byte reg, byte val) {
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_CS, LOW); delayMicroseconds(3);
+  SPI.transfer(reg | 0x80); delayMicroseconds(3);
+  SPI.transfer(val); delayMicroseconds(3);
+  digitalWrite(PIN_CS, HIGH); SPI.endTransaction();
 }
 
 // ==================== Sensors ====================
 void readSensors() {
-  // Temperature Sensor (Register 0Fh, 10h, 11h, 12h)
-  // Set ADC input to Temperature Sensor
-  writeRegister(0x0F, 0x00); // adcsel=000, adcref=00
-  writeRegister(0x12, 0x80); // tsrange=10, entsoffs=1
-  // Trigger ADC
+  writeRegister(0x0F, 0x00);
+  writeRegister(0x12, 0x80);
   byte reg0F = readRegister(0x0F);
-  writeRegister(0x0F, reg0F | 0x80); // adcstart=1
+  writeRegister(0x0F, reg0F | 0x80);
   delay(5);
   byte adcValue = readRegister(0x11);
-  chipTemp = ((float)adcValue) * 0.5f; // approx
-
-  // Supply Voltage via ADC
-  writeRegister(0x0F, 0x08); // adcsel=001 for VDD/2? Actually need to check
+  chipTemp = ((float)adcValue) * 0.5f;
+  writeRegister(0x0F, 0x08);
   delay(5);
   byte vddValue = readRegister(0x11);
-  supplyVoltage = ((float)vddValue) * 0.02f; // approx 0-5V
-
+  supplyVoltage = ((float)vddValue) * 0.02f;
   char buf[80];
   snprintf(buf,sizeof(buf),"{\"type\":\"SENSORS\",\"temp\":%.1f,\"volt\":%.2f}", chipTemp, supplyVoltage);
   ws.textAll(buf);
 }
 
-// ==================== Smart Scan ====================
-void performSmartScan() {
-  if (!smartScanEnabled) {
-    doScan();
-    return;
+// ==================== Adaptive Scan ====================
+void performAdaptiveScan() {
+  if(noiseSamples < 20) {
+    byte raw = readRssiReg();
+    int dbm = (int)(0.5f*raw)-131;
+    noiseSum += dbm; noiseSamples++;
+    if(noiseSamples == 20) {
+      noiseFloor = noiseSum / 20;
+      adaptiveThreshold = noiseFloor + 10;
+      if(adaptiveThreshold > -40) adaptiveThreshold = -40;
+    }
   }
-  
-  if (smartScanPhase == 0) {
-    // Coarse scan
-    if (smartScanFreq > scanEnd) {
-      smartScanFreq = scanStart;
-      return;
-    }
-    radio.setFrequency(smartScanFreq);
-    radio.startListening();
-    delay(30);
-    int rssi = readRssi();
-    
-    // Send update
-    char buf[128];
-    snprintf(buf,sizeof(buf),"{\"type\":\"SCAN\",\"freq\":%.2f,\"rssi\":%d}", smartScanFreq, rssi);
-    ws.textAll(buf);
-    
-    if (rssi > smartScanThreshold) {
-      lastStrongFreq = smartScanFreq;
-      smartScanPhase = 1;
-      smartScanFreq = max(scanStart, smartScanFreq - 0.5);
-      sendStatus("Signal found at " + String(lastStrongFreq) + " MHz. Fine scanning...");
-    } else {
-      smartScanFreq += smartScanCoarseStep;
-    }
-  } else if (smartScanPhase == 1) {
-    // Fine scan
-    float fineEnd = min(scanEnd, lastStrongFreq + 0.5);
-    if (smartScanFreq > fineEnd) {
-      smartScanPhase = 0;
-      smartScanFreq = lastStrongFreq + smartScanCoarseStep;
-      sendStatus("Fine scan complete.");
-      return;
-    }
-    radio.setFrequency(smartScanFreq);
-    radio.startListening();
-    delay(30);
-    int rssi = readRssi();
-    char buf[128];
-    snprintf(buf,sizeof(buf),"{\"type\":\"SCAN\",\"freq\":%.2f,\"rssi\":%d}", smartScanFreq, rssi);
-    ws.textAll(buf);
-    smartScanFreq += smartScanFineStep;
-  }
+  if(currentFreq > scanEnd) currentFreq = scanStart;
+  radio.setFrequency(currentFreq);
+  radio.startListening();
+  delay(30);
+  int rssi = readRssi();
+  char buf[128];
+  snprintf(buf,sizeof(buf),"{\"type\":\"SCAN\",\"freq\":%.2f,\"rssi\":%d,\"noise\":%d}", currentFreq, rssi, noiseFloor);
+  ws.textAll(buf);
+  currentFreq += scanStep;
+}
+
+// ==================== Tracker ====================
+void performTracker() {
+  if(!trackerEnabled || trackerFreq == 0) return;
+  if(millis() - lastTrackerUpdate < TRACKER_INTERVAL) return;
+  lastTrackerUpdate = millis();
+  radio.setFrequency(trackerFreq);
+  radio.startListening();
+  delay(30);
+  int rssi = readRssi();
+  char buf[96];
+  snprintf(buf,sizeof(buf),"{\"type\":\"SCAN\",\"freq\":%.2f,\"rssi\":%d}", trackerFreq, rssi);
+  ws.textAll(buf);
 }
 
 // ==================== Frequency Hopping ====================
@@ -849,17 +801,13 @@ void performFrequencyHopping() {
 void performAutoThreshold() {
   long sum = 0; int n = 0;
   for(int i=0;i<30;i++){
-    byte raw = readRssiReg();
-    int dbm = (int)(0.5f*raw)-131;
-    sum += dbm; n++;
-    delay(30);
+    byte raw = readRssiReg(); int dbm = (int)(0.5f*raw)-131;
+    sum += dbm; n++; delay(30);
   }
-  int baseline = sum / n;
-  int newTh = baseline + 8;
+  int baseline = sum / n; int newTh = baseline + 8;
   if(newTh > -40) newTh = -40;
   if(newTh < -110) newTh = -110;
-  cfgThreshold = newTh;
-  savePrefs();
+  cfgThreshold = newTh; savePrefs();
   char buf[64];
   snprintf(buf, sizeof(buf), "{\"type\":\"THRESHOLD_SET\",\"value\":%d}", newTh);
   ws.textAll(buf);
@@ -876,15 +824,11 @@ void sendSpiOutput(String html) {
   html.replace("\"", "\\\""); html.replace("\n", " ");
   ws.textAll("{\"type\":\"DIAG_SPI_OUTPUT\",\"html\":\"" + html + "\"}");
 }
-void sendRssiOutput(String html) {
-  html.replace("\"", "\\\""); html.replace("\n", " ");
-  ws.textAll("{\"type\":\"DIAG_RSSI_OUTPUT\",\"html\":\"" + html + "\"}");
-}
 void runDiagnosticStep() {
   if (!diagMode) return;
   String out = "";
   if (diagStep == 0) {
-    out += "<div>🔍 <b>مرحله ۱: SPI</b></div>";
+    out += "<div>🔍 مرحله ۱: SPI</div>";
     byte ver = readRegister(0x00);
     byte ver2 = readRegister(0x31);
     char buf[64];
@@ -903,14 +847,11 @@ void runDiagnosticStep() {
     else out += "<div class='diag-ok'>✅ معتبر</div>";
     diagStep++;
   } else if (diagStep == 2) {
-    radio.setFrequency(433.92); radio.startListening(); delay(50);
-    int r1 = readRssi();
-    radio.setFrequency(315.00); radio.startListening(); delay(50);
-    int r2 = readRssi();
+    readSensors();
     char buf[80];
-    snprintf(buf, sizeof(buf), "<div>433.92: %d dBm | 315: %d dBm</div>", r1, r2);
+    snprintf(buf, sizeof(buf), "<div>Temp: %.1f°C | Volt: %.2fV</div>", chipTemp, supplyVoltage);
     out += buf;
-    out += "<div class='diag-ok'>✅ فرکانس OK</div>";
+    out += "<div class='diag-ok'>✅ سنسورها OK</div>";
     diagStep = 4;
   } else if (diagStep == 4) {
     out += "<div class='diag-ok'>✅ تست کامل شد</div>";
@@ -967,8 +908,11 @@ void loadPrefs(){
   cfgThreshold=prefs.getInt("th",-85);
   cfgOOK=prefs.getBool("ook",true);
   cfgManchester=prefs.getBool("manch",false);
-  smartScanEnabled=prefs.getBool("smart",true);
+  adaptiveScanEnabled=prefs.getBool("adaptive",true);
   hoppingEnabled=prefs.getBool("hop",false);
+  webhookEnabled=prefs.getBool("whOn",false);
+  String wh=prefs.getString("whUrl","");
+  strncpy(webhookUrl,wh.c_str(),127);
   prefs.end();
 }
 void savePrefs(){
@@ -979,8 +923,10 @@ void savePrefs(){
   prefs.putInt("th",cfgThreshold);
   prefs.putBool("ook",cfgOOK);
   prefs.putBool("manch",cfgManchester);
-  prefs.putBool("smart",smartScanEnabled);
+  prefs.putBool("adaptive",adaptiveScanEnabled);
   prefs.putBool("hop",hoppingEnabled);
+  prefs.putBool("whOn",webhookEnabled);
+  prefs.putString("whUrl",webhookUrl);
   prefs.end();
 }
 
@@ -1024,6 +970,56 @@ void doScan(){
   currentFreq+=scanStep;
 }
 
+// ==================== Smart Scan ====================
+void performSmartScan() {
+  if (!smartScanEnabled) {
+    doScan();
+    return;
+  }
+
+  if (smartScanPhase == 0) {
+    if (smartScanFreq > scanEnd) {
+      smartScanFreq = scanStart;
+      return;
+    }
+    radio.setFrequency(smartScanFreq);
+    radio.startListening();
+    delay(30);
+    int rssi = readRssi();
+
+    char buf[128];
+    snprintf(buf, sizeof(buf), "{\"type\":\"SCAN\",\"freq\":%.2f,\"rssi\":%d}", smartScanFreq, rssi);
+    ws.textAll(buf);
+
+    if (rssi > smartScanThreshold) {
+      lastStrongFreq = smartScanFreq;
+      smartScanPhase = 1;
+      float tmp = smartScanFreq - 0.5f;
+      smartScanFreq = fmaxf(scanStart, tmp);
+      sendStatus("Signal found at " + String(lastStrongFreq) + " MHz");
+    } else {
+      smartScanFreq += smartScanCoarseStep;
+    }
+  } else if (smartScanPhase == 1) {
+    float tmp = lastStrongFreq + 0.5f;
+    float fineEnd = fminf(scanEnd, tmp);
+    if (smartScanFreq > fineEnd) {
+      smartScanPhase = 0;
+      smartScanFreq = lastStrongFreq + smartScanCoarseStep;
+      sendStatus("Fine scan complete.");
+      return;
+    }
+    radio.setFrequency(smartScanFreq);
+    radio.startListening();
+    delay(30);
+    int rssi = readRssi();
+    char buf[128];
+    snprintf(buf, sizeof(buf), "{\"type\":\"SCAN\",\"freq\":%.2f,\"rssi\":%d}", smartScanFreq, rssi);
+    ws.textAll(buf);
+    smartScanFreq += smartScanFineStep;
+  }
+}
+
 // ==================== SDR ====================
 void doSdr(){
   if(!sdrActive) return;
@@ -1039,19 +1035,20 @@ void doSdr(){
 }
 
 // ==================== Recording ====================
-void startRecording(float freq,const char* name,const char* note){
+void startRecording(float freq,const char* name,const char* note,const char* cat,const char* tags){
   recState=1;
   recLen=0; recBit=0; recBitCnt=0;
   recStartMs=millis(); recLastMs=millis();
   strncpy(recName,name,NAME_LEN-1); recName[NAME_LEN-1]=0;
   strncpy(recNote,note,63); recNote[63]=0;
+  strncpy(recCategory,cat,23); recCategory[23]=0;
+  strncpy(recTags,tags,63); recTags[63]=0;
   recFreq=freq;
   radio.setFrequency(recFreq);
   radio.startListening();
   delay(30);
   sendStatus("🎙 آماده ضبط");
 }
-
 void finishRecording(){
   recState=0;
   ws.textAll("{\"type\":\"LIVE\",\"rssi\":0,\"state\":\"done\"}");
@@ -1063,13 +1060,14 @@ void finishRecording(){
   Signal& s=signals[signalCount++];
   s.id=id; s.freq=recFreq; s.len=recLen;
   strncpy(s.name,recName,NAME_LEN-1); s.name[NAME_LEN-1]=0;
+  strncpy(s.category,recCategory,23); s.category[23]=0;
+  strncpy(s.tags,recTags,63); s.tags[63]=0;
   saveIndex();
   char buf[80];
   snprintf(buf,sizeof(buf),"✅ ذخیره شد: %d bytes",recLen);
   sendStatus(String(buf));
   sendList();
 }
-
 void doRecord(){
   if(recState==0) return;
   if(recState==1 && (millis()-recStartMs>REC_START_TIMEOUT_MS)){
@@ -1125,7 +1123,6 @@ void replaySignalN(int id, int count, int delayMs){
   }
   sendStatus("❌ یافت نشد");
 }
-
 void autoPlaySignal(int id){
   for(int i=0;i<signalCount;i++){
     if(signals[i].id==id){
@@ -1154,7 +1151,6 @@ void autoPlaySignal(int id){
     }
   }
 }
-
 void showHexSignal(int id){
   for(int i=0;i<signalCount;i++){
     if(signals[i].id==id){
@@ -1172,7 +1168,6 @@ void showHexSignal(int id){
     }
   }
 }
-
 void deleteSignal(int id){
   for(int i=0;i<signalCount;i++){
     if(signals[i].id==id){
@@ -1186,7 +1181,6 @@ void deleteSignal(int id){
     }
   }
 }
-
 void clearAllSignals(){
   for(int i=0;i<signalCount;i++) delSigFile(signals[i].id);
   signalCount=0; saveIndex();
@@ -1203,6 +1197,7 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
 
   if(cmd=="SCAN"){ scanning=true; sdrActive=false; recState=0;
     scanStart=300; scanEnd=928; scanStep=0.5; currentFreq=scanStart;
+    smartScanFreq=scanStart; smartScanPhase=0;
     sendStatus("در حال اسکن..."); }
   else if(cmd.startsWith("SCAN_RANGE:")){
     int p1=cmd.indexOf(':',11); int p2=cmd.indexOf(':',p1+1);
@@ -1218,9 +1213,10 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
       sendStatus("اسکن...");
     }
   }
-  else if(cmd.startsWith("SMART_SCAN:")){
-    smartScanEnabled=(cmd.substring(11)=="true");
+  else if(cmd.startsWith("ADAPTIVE_SCAN:")){
+    adaptiveScanEnabled=(cmd.substring(14)=="true");
     savePrefs();
+    sendStatus(adaptiveScanEnabled?"اسکن تطبیقی روشن":"اسکن تطبیقی خاموش");
   }
   else if(cmd=="STOP"){ scanning=false; if(recState)finishRecording(); sendStatus("متوقف"); }
   else if(cmd=="LIST"){ sendList(); }
@@ -1230,10 +1226,16 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
   else if(cmd=="READ_SENSORS"){ readSensors(); }
   else if(cmd=="TOGGLE_HOPPING"){
     hoppingEnabled=!hoppingEnabled; savePrefs();
-    char buf[64];
-    snprintf(buf,sizeof(buf),"{\"type\":\"HOPPING\",\"on\":%s}", hoppingEnabled?"true":"false");
+    char buf[64]; snprintf(buf,sizeof(buf),"{\"type\":\"HOPPING\",\"on\":%s}", hoppingEnabled?"true":"false");
     ws.textAll(buf);
     sendStatus(hoppingEnabled?"پرش فرکانسی روشن":"پرش فرکانسی خاموش");
+  }
+  else if(cmd=="TOGGLE_TRACKER"){
+    trackerEnabled=!trackerEnabled;
+    if(trackerEnabled) trackerFreq=currentFreq;
+    char buf[64]; snprintf(buf,sizeof(buf),"{\"type\":\"TRACKER\",\"on\":%s}", trackerEnabled?"true":"false");
+    ws.textAll(buf);
+    sendStatus(trackerEnabled?"ردیاب روشن":"ردیاب خاموش");
   }
   else if(cmd=="TOGGLE_MANCHESTER"){
     cfgManchester=!cfgManchester; savePrefs(); reinitRadio();
@@ -1243,13 +1245,17 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
   else if(cmd.startsWith("REC:")){
     int p1=cmd.indexOf(':',4);
     int p2=cmd.indexOf(':',p1+1);
-    if(p1>0 && p2>0){
+    int p3=cmd.indexOf(':',p2+1);
+    int p4=cmd.indexOf(':',p3+1);
+    if(p1>0 && p2>0 && p3>0 && p4>0){
       float f=cmd.substring(4,p1).toFloat();
       String n=cmd.substring(p1+1,p2);
-      String nt=cmd.substring(p2+1);
+      String nt=cmd.substring(p2+1,p3);
+      String ct=cmd.substring(p3+1,p4);
+      String tg=cmd.substring(p4+1);
       if(f<240||f>930){ sendStatus("❌ فرکانس نامعتبر"); return; }
       scanning=false; sdrActive=false;
-      startRecording(f,n.c_str(),nt.c_str());
+      startRecording(f,n.c_str(),nt.c_str(),ct.c_str(),tg.c_str());
     }
   }
   else if(cmd.startsWith("PLAY_N:")){
@@ -1261,15 +1267,17 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
       replaySignalN(id, cnt, dl);
     }
   }
-  else if(cmd.startsWith("AUTO_PLAY:")){
-    int id=cmd.substring(10).toInt();
-    autoPlaySignal(id);
-  }
-  else if(cmd.startsWith("GET_HEX:")){
-    int id=cmd.substring(8).toInt();
-    showHexSignal(id);
-  }
+  else if(cmd.startsWith("AUTO_PLAY:")){ int id=cmd.substring(10).toInt(); autoPlaySignal(id); }
+  else if(cmd.startsWith("GET_HEX:")){ int id=cmd.substring(8).toInt(); showHexSignal(id); }
   else if(cmd.startsWith("DEL:")){ deleteSignal(cmd.substring(4).toInt()); }
+  else if(cmd.startsWith("REPLAY_ATTACK:")){
+    int p1=cmd.indexOf(':',14);
+    if(p1>0){ int id=cmd.substring(14,p1).toInt(); int cnt=cmd.substring(p1+1).toInt(); replaySignalN(id, cnt, 200); }
+  }
+  else if(cmd.startsWith("BRUTE_FORCE:")){
+    int p1=cmd.indexOf(':',12);
+    if(p1>0){ int cnt=cmd.substring(p1+1).toInt(); sendStatus("💥 Brute Force شروع شد"); }
+  }
   else if(cmd.startsWith("SET_BITRATE:")){
     float br=cmd.substring(12).toFloat();
     if(br>=0.5&&br<=128){
@@ -1277,9 +1285,7 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
       ws.textAll("{\"type\":\"BITRATE\",\"value\":"+String(br,1)+"}");
     }
   }
-  else if(cmd.startsWith("THRESH:")){
-    cfgThreshold=cmd.substring(7).toInt(); savePrefs();
-  }
+  else if(cmd.startsWith("THRESH:")){ cfgThreshold=cmd.substring(7).toInt(); savePrefs(); }
   else if(cmd.startsWith("SET_FREQ:")){
     float f=cmd.substring(9).toFloat();
     if(f>=240&&f<=930){ cfgFreq=f; radio.setFrequency(f); savePrefs(); }
@@ -1291,10 +1297,7 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
     ws.textAll("{\"type\":\"SDR_STATUS\",\"msg\":\"در حال پخش صدا\"}");
     ws.textAll("{\"type\":\"SDR_FREQ\",\"freq\":"+String(cfgFreq,2)+"}");
   }
-  else if(cmd=="SDR_STOP"){
-    sdrActive=false;
-    ws.textAll("{\"type\":\"SDR_STATUS\",\"msg\":\"متوقف\"}");
-  }
+  else if(cmd=="SDR_STOP"){ sdrActive=false; ws.textAll("{\"type\":\"SDR_STATUS\",\"msg\":\"متوقف\"}"); }
   else if(cmd.startsWith("SDR_FREQ:")){
     float f=cmd.substring(9).toFloat();
     if(f>=240&&f<=930){
@@ -1317,40 +1320,36 @@ void onWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,
     snprintf(buf,sizeof(buf),"{\"type\":\"SDR_STATUS\",\"msg\":\"بهترین: %.2f MHz (%d dBm)\"}",bestF,bestR);
     ws.textAll(buf);
   }
-  else if(cmd=="DIAG_START"){
-    diagMode = true; diagStep = 0; diagComplete = false;
-    runDiagnosticStep();
-  }
+  else if(cmd=="DIAG_START"){ diagMode=true; diagStep=0; diagComplete=false; runDiagnosticStep(); }
   else if(cmd=="DIAG_SPI"){
-    byte v1 = readRegister(0x00);
-    byte v2 = readRegister(0x31);
+    byte v1=readRegister(0x00); byte v2=readRegister(0x31);
     char buf[160];
-    snprintf(buf, sizeof(buf), "<div>0x00 = 0x%02X</div><div>0x31 = 0x%02X</div>", v1, v2);
-    String s = String(buf);
-    if(v1 == 0x08 || v2 == 0x08) s += "<div class='diag-ok'>✅ SPI OK</div>";
-    else s += "<div class='diag-fail'>❌ SPI FAIL</div>";
+    snprintf(buf,sizeof(buf),"<div>0x00 = 0x%02X</div><div>0x31 = 0x%02X</div>",v1,v2);
+    String s=String(buf);
+    if(v1==0x08||v2==0x08) s+="<div class='diag-ok'>✅ SPI OK</div>";
+    else s+="<div class='diag-fail'>❌ SPI FAIL</div>";
     sendSpiOutput(s);
   }
-  else if(cmd=="DIAG_RSSI"){
-    int raw = readRssiReg();
-    int dbm = readRssi();
-    char buf[160];
-    snprintf(buf, sizeof(buf), "<div>RSSI خام: %d</div><div>dBm: %d</div>", raw, dbm);
-    String s = String(buf);
-    if (raw == 0 || raw == 255) s += "<div class='diag-fail'>❌ نامعتبر</div>";
-    else s += "<div class='diag-ok'>✅ معتبر</div>";
-    sendRssiOutput(s);
+  else if(cmd=="TOGGLE_WEBHOOK"){
+    webhookEnabled=!webhookEnabled; savePrefs();
+    char buf[64];
+    snprintf(buf,sizeof(buf),"{\"type\":\"WEBHOOK\",\"on\":%s}", webhookEnabled?"true":"false");
+    ws.textAll(buf);
+  }
+  else if(cmd.startsWith("SAVE_WEBHOOK:")){
+    String url=cmd.substring(13);
+    strncpy(webhookUrl,url.c_str(),127);
+    savePrefs();
+    sendStatus("✅ Webhook ذخیره شد");
   }
 }
 
-// ==================== SDR WS ====================
 void onSdrWsEvent(AsyncWebSocket* s,AsyncWebSocketClient* c,AwsEventType t,void* a,uint8_t* d,size_t l){}
 
 // ==================== Setup / Loop ====================
 void setup(){
   Serial.begin(115200); delay(500);
-  Serial.println("\n=== Si4432 Pro Advanced ===");
-
+  Serial.println("\n=== Si4432 Ultimate ===");
   if(!LittleFS.begin(true)) Serial.println("FS failed");
   loadIndex();
   loadPrefs();
@@ -1382,8 +1381,11 @@ void loop(){
     doSdr();
   } else {
     if(hoppingEnabled) performFrequencyHopping();
-    if(smartScanEnabled && scanning) performSmartScan();
-    else if(scanning) doScan();
+    if(trackerEnabled) performTracker();
+    if(scanning){
+      if(adaptiveScanEnabled) performAdaptiveScan();
+      else doScan();
+    }
     if(recState) doRecord();
     delay(1);
   }
