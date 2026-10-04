@@ -1,6 +1,9 @@
-name: Build SI4432 Controller
+name: Build Si4432 Ultimate Firmware
 
-on: [workflow_dispatch]
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -32,6 +35,9 @@ jobs:
         run: |
           ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true arduino-cli lib install --git-url https://github.com/nopnop2002/Arduino-SI4432.git
 
+      - name: Install ArduinoJson
+        run: arduino-cli lib install "ArduinoJson@6.21.5"
+
       - name: Compile
         run: |
           arduino-cli compile \
@@ -54,7 +60,7 @@ jobs:
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: si4432-firmware
+          name: si4432-ultimate-firmware
           path: |
             merged-firmware.bin
             build/MySketch.ino.bin
