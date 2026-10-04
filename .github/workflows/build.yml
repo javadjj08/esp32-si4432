@@ -1,4 +1,4 @@
-name: Build Si4432 Ultimate Firmware
+name: Build RF Ultimate Firmware
 
 on:
   push:
@@ -9,10 +9,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Install arduino-cli
-        run: curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=/usr/local/bin sh
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=/usr/local/bin sh
 
       - name: Setup arduino-cli
         run: |
@@ -35,8 +37,9 @@ jobs:
         run: |
           ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true arduino-cli lib install --git-url https://github.com/nopnop2002/Arduino-SI4432.git
 
-      - name: Install ArduinoJson
-        run: arduino-cli lib install "ArduinoJson@6.21.5"
+      - name: Install RF24 library
+        run: |
+          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true arduino-cli lib install --git-url https://github.com/nRF24/RF24.git
 
       - name: Compile
         run: |
@@ -57,10 +60,10 @@ jobs:
             0xe000 "$BOOT_APP0" \
             0x10000 build/MySketch.ino.bin
 
-      - name: Upload
+      - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: si4432-ultimate-firmware
+          name: rf-ultimate-firmware
           path: |
             merged-firmware.bin
             build/MySketch.ino.bin
